@@ -1,62 +1,60 @@
-# Installing (just type it)
+# 安装（照着敲就行）
 
-## 0. Check that your dsh has the `plugin` subcommand
+## 0. 先确认你的 dsh 有 `plugin` 子命令
 
 ```bash
 dsh plugin --help
 ```
 
-If that errors, your version is older — mount things by hand instead (each plugin's README explains how).
+报错的话说明你的版本较老，走**手工挂载**（两个插件各自的 README 里都写了）。
 
-## 1. Install (one command)
+## 1. 装（一条命令）
 
 ```bash
-cd /absolute/path/to/dsh-degeneration-kit
+cd /你放它的绝对路径/dsh-degeneration-kit
 bash install.sh
 ```
 
-`install.sh` does one thing: it calls dsh's own install command for you, for both plugins. Flags:
+`install.sh` 就干一件事：替你调 `dsh` 自己的安装命令，把两个插件都装上。开关：
 
-| Flag | Effect |
+| 开关 | 作用 |
 |---|---|
-| (none) | install both |
-| `--only guard` | only `thinking-guard` (folding) |
-| `--only checkpoint` | only `dsh-auto-checkpoint` (compaction / fresh session) |
-| `--profile <name>` | use another profile (default `web`) |
+| （不带） | 两个都装 |
+| `--only guard` | 只装 `thinking-guard`（折叠） |
+| `--only checkpoint` | 只装 `dsh-auto-checkpoint`（压缩 / 换会话） |
+| `--profile <名字>` | 换 profile（默认 `web`） |
 
-If it cannot find the `dsh` command it looks for `bin.js` in the usual places, and if that fails too it prints the
-commands for you to run by hand instead of guessing.
+它找不到 `dsh` 命令时会自己去常见位置找 `bin.js`，都找不到就把你要手敲的命令打印出来，不会瞎猜。
 
-Typing them yourself is equivalent:
+想手敲也行，等价于这两条：
 
 ```bash
-# (1) folding — install at least this one
-dsh plugin --profile web add /absolute/path/to/dsh-degeneration-kit/thinking-guard
+# ① 折叠（推荐至少装这个）
+dsh plugin --profile web add /你放它的绝对路径/dsh-degeneration-kit/thinking-guard
 
-# (2) compaction / fresh session — add this if you want it exhaustive
-dsh plugin --profile web add /absolute/path/to/dsh-degeneration-kit/auto-checkpoint
+# ② 压缩 / 换会话（想要"彻底一点"就再装这个）
+dsh plugin --profile web add /你放它的绝对路径/dsh-degeneration-kit/auto-checkpoint
 ```
 
-⚠️ Use an **absolute path** pointing at the **subdirectory** (not the repo root).
+⚠️ 路径写**绝对路径**，指向**子目录**（不是仓库根目录）。
 
-**What those two commands do** (measured locally, finished in 468 ms):
+**这两条命令会做什么**（本机实测过，468ms 装完）：
 
-- add the package to the profile's dependencies — a local path becomes `link:`, so **files are not copied** and
-  editing the source takes effect immediately;
-- **add the package name to the profile's `bundles` list automatically** (the package declares `dsh.bundle.patch`).
+- 把包加进 profile 的依赖 —— 本地路径走 `link:`，**不复制文件**，所以你改源码立刻生效；
+- **自动把包名加进 profile 的 `bundles` 列表**（因为包里声明了 `dsh.bundle.patch`）。
 
-## 2. Restart dsh web
+## 2. 重启 dsh web
 
-Plugins load **at startup**; editing a `.mjs` and refreshing the page does nothing.
+插件是**启动时**加载的，`.mjs` 改完刷新页面没用。
 
-## 3. Verify (30 seconds, no guessing)
+## 3. 验证（30 秒，不用猜）
 
 ```bash
 dsh --profile web --dump-config | grep -A8 'dsh-thinking-guard'
 dsh --profile web --dump-config | grep -A8 'auto-checkpoint'
 ```
 
-The first one should show:
+第一条应该能看到：
 
 ```
 - id: thinking-guard
@@ -67,56 +65,51 @@ The first one should show:
     enabled: true
 ```
 
-Seeing that means it entered the plugin tree — the line between "installed" and "actually loaded".
+看到了就是进了插件树 —— 这是"装上了"和"真的加载了"的分界线。
 
-## 4. Configuration lives in the package's `cordis.patch.yml`
+## 4. 改配置 = 改包里的 `cordis.patch.yml`
 
-To **watch first, act later**: uncomment the line
+比如想**先观察、不真动手**：把 `thinking-guard/cordis.patch.yml` 里的
 
 ```yaml
         # dryRun: true
 ```
 
-in `thinking-guard/cordis.patch.yml` and **restart**. This was measured — the line shows up in `--dump-config`
-as `dryRun: true`.
+那行注释去掉，**重启**。已实测这行会进插件树（`--dump-config` 里能看到 `dryRun: true`）。
 
-Thresholds work the same way; every key in that file is commented.
+阈值同理，那个文件里每一项都有注释。
 
-### Thresholds can also be dragged in the UI (no restart)
+### 阈值也可以直接在界面上拖（不用重启）
 
-`dsh-auto-checkpoint` has two panel entry points, **use whichever you can see**:
+`dsh-auto-checkpoint` 的面板有两个入口，**看到哪个用哪个**：
 
-- with the desktop-pet plugin `dsh-cost-whale` ⇒ the panel is in that pet's menu;
-- without it ⇒ the plugin ships a **floating panel in the bottom-right corner** (collapsed to a small button).
+- 装了桌宠插件 `dsh-cost-whale` ⇒ 面板在桌宠的菜单里；
+- 没装 ⇒ 插件自带**右下角浮动面板**（默认收成一个小按钮，点开就是滑块）。
 
-If the floating panel does not appear on its own, force it with `?acfloat=1`, e.g. `http://127.0.0.1:3081/?acfloat=1`.
-(If the URL already carries `?token=...`, **do not add another question mark** — append `#acfloat` instead.)
+浮动面板没自动冒出来的话，在地址后面加 `?acfloat=1` 强制打开，例如 `http://127.0.0.1:3081/?acfloat=1`。
+（地址里已经带着 `?token=...` 时**别再加问号**，直接在最末尾加 `#acfloat`。）
 
-Dragging takes effect **at runtime** (the panel POSTs to the runtime config route, updating memory and disk
-together) — **no restart**.
+拖动是**运行时生效**的（面板往运行时接口发一次 POST，内存和磁盘一起更新），**不用重启**。
 
-## 5. Can I install only one?
+## 5. 只装一个行不行？
 
-Yes. But **install `thinking-guard` at least**: it has zero host-service dependencies, hooks exactly one event,
-and does not touch your session structure.
-`dsh-auto-checkpoint` **changes your sessions** (compaction / new session), so configure the thresholds for your
-window before enabling it (see that plugin's README).
+行。但**建议至少装 `thinking-guard`**：它零宿主服务依赖、只挂一个钩子、不改你的会话结构，装上就没有副作用面。
+`dsh-auto-checkpoint` 会**改你的会话**（压缩 / 换新会话），建议先把阈值按自己的窗口配好再开（见它 README 的「配置」一节）。
 
-⚠️ **Do not mount the same entry twice in one profile** (e.g. install the package *and* hand-write an entry in a
-preset) — startup fails with `duplicate loader entry id`. Run `--dump-config` first.
+⚠️ **别在同一个 profile 里重复挂同一条**（比如既装了包、又在 preset 里手写了一份），启动会报 `duplicate loader entry id`。挂之前先 `--dump-config` 看一眼。
 
-## 6. Uninstalling
+## 6. 卸载
 
-Remove the two lines from the profile's `bundles` and `dependencies`, then restart.
-(`dsh plugin --profile web remove <name>` probably works too, but we did not measure it, so we don't claim it does.)
+把 profile 的 `bundles` 和 `dependencies` 里对应的那两行删掉，重启。
+（`dsh plugin --profile web remove <包名>` 应该也行，但我们没实测，所以不写成"一定可以"。）
 
-## Troubleshooting
+## 常见问题
 
-| Symptom | Cause / fix |
+| 症状 | 原因 / 怎么办 |
 |---|---|
-| Nothing happens after install | You did not restart. Plugins load at startup |
-| Cannot find the panel / sliders | Without the desktop pet, add `?acfloat=1` to the URL; with it, open the pet's menu |
-| `duplicate loader entry id` on startup | You mounted the same entry before — remove the old one |
-| Want to see what it does | Give `debugFile` a path in `cordis.patch.yml`; read that file after restarting |
-| `dsh plugin` does not exist | Older version ⇒ mount by hand (each plugin's README) |
-| Want proof it is running | With `debugFile` set, the log shows `apply 被调用` and `sweep 首次：surface N 节点` |
+| 装完没反应 | 没重启。插件启动时加载 |
+| 面板 / 滑块找不到 | 没装桌宠 ⇒ 地址后加 `?acfloat=1`；装了 ⇒ 点桌宠菜单 |
+| 启动报 `duplicate loader entry id` | 之前挂过同名条目，先删旧的 |
+| 想看它到底干了什么 | 在 `cordis.patch.yml` 里给 `debugFile` 一个路径，重启后看那个文件 |
+| `dsh plugin` 不存在 | 版本较老 ⇒ 手工挂载（各插件 README 的「安装」一节） |
+| 想确认它真的在跑 | 配了 `debugFile` 后，日志里会出现 `apply 被调用` 和 `sweep 首次：surface N 节点` |

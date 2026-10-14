@@ -1,76 +1,68 @@
-# DSH degeneration kit — ⚠️ **two plugins, and you need both**
+# DSH 防退化套件 —— ⚠️ **两个插件，两个都得装才完整**
 
-> The longer the context, the more a model spins in "I'm about to do X" loops — and the turn still looks
-> **successful**, so you will not notice (measured locally: 18 of 24 real degenerate blocks ended their turn
-> normally; the damage stayed inside the reasoning).
+**[English](README.en.md) | 中文**
+
+> 上下文越长，模型越容易陷进「我要做 X」的空转（复读），而且**回合看起来还是成功的**，
+> 不加检测根本发现不了（本机实测：24 个真退化块里 18 个回合正常结束，只在思考里烂）。
 >
-> This repo holds **two** plugins, each covering one half:
+> 这个仓库里有**两个**插件，**各治一半**：
 >
-> - **produce less** — `thinking-guard`: folds a degenerate reasoning block out of the model-visible history so it
->   is not replayed every step;
-> - **clear the stock** — `dsh-auto-checkpoint`: at a watermark, **compact** (clear the pollution that already
->   accumulated) or **hand off to a fresh session**.
+> - **少产生** —— `thinking-guard`：把退化的思考块从模型可见的历史里**折叠**掉，不让它每轮重放；
+> - **清库存** —— `dsh-auto-checkpoint`：到水位**压缩**（把已经累积的污染整体清掉），或**换一个新会话**。
 >
-> **Drop either half and something slips through** (three reasons below). One alone still beats nothing, but for
-> real coverage, install both.
+> **缺一个都会漏**（理由见下表后面的三条）。只装一个也比裸奔强，但**要真想彻底解决，两个都要装**。
 
-## Why two, and why both
+## 为什么是两个、而且两个都需要
 
-| Plugin | What it does | When |
+| 插件 | 干什么 | 时机 |
 |---|---|---|
-| **`thinking-guard`** | folds a degenerate reasoning block out of the **model-visible history** | **immediately** (next pre-step, before it is re-sent many times) |
-| **`dsh-auto-checkpoint`** | at a watermark, **compact** (clear accumulated pollution) or **hand off to a fresh session** | **afterwards** |
+| **`thinking-guard`** | 把退化的思考块从**模型可见的历史**里折叠掉 | **当场**（下一次 pre-step，趁它还没被反复回传） |
+| **`dsh-auto-checkpoint`** | 到水位**压缩**（清掉累积污染），或**换一个新会话** | **事后** |
 
-Three reasons, and missing any one leaves a hole:
+三条理由，缺一条都会留下漏洞：
 
-1. **Folding cannot reach inside a single generation.** It cannot stop a loop that is being generated right now —
-   it can only cut it on the next step, and that step's pollution has already been sent once.
-2. **Only compaction clears the stock.** Pollution accumulated over several missed blocks is slow to cut one block
-   at a time; compaction clears it wholesale (measured locally: in one session with 12 compactions, every
-   compaction that had accumulated pollution reduced it, the strongest going **43 → 0** with no recurrence).
-3. **There are steps between compactions.** With compaction only, every step between two compactions still replays
-   the pollution — that is exactly the stretch folding covers.
+1. **折叠管不到一次生成内部。** 一条复读正在生成的时候它拦不住 —— 只能等下一步再剪。那一步的污染已经产生、已经回传过一次。
+2. **只有压缩能清"库存"。** 多次漏检攒下来的污染块，折叠一块块剪很慢；压缩能一次性把累积的压下去（本机实测：一个会话 12 次压缩，凡有累积污染时压缩后都下降，最强一次 **43 → 0**，此后零复发）。
+3. **压缩之间还有步子。** 只装压缩的话，两次压缩之间的每一步仍在被污染重放 —— 那正是折叠负责的那一段。
 
-⇒ In one line: **folding = produce less, compaction = clear the stock. You need both for a closed loop.**
+⇒ 一句话：**折叠 = 少产生，压缩 = 清库存。两个都在，才是闭环。**
 
-## Install (3 minutes)
+## 装（3 分钟）
 
-→ [`INSTALL.md`](INSTALL.md) (two commands + how to verify + troubleshooting)
+→ 看 [`INSTALL.md`](INSTALL.md)（两条命令 + 验证方法 + 常见问题）
 
-## The two plugins
+## 两个插件各自
 
-| Plugin | Size | README |
+| 插件 | 规模 | README |
 |---|---|---|
-| `thinking-guard/` | ~760 lines (`lib/`, three files, stop-valve included), **zero host-service dependencies** | [English](thinking-guard/README.md)｜[中文](thinking-guard/README.zh.md) |
-| `auto-checkpoint/` | 4,292 lines, 8 host services | [English](auto-checkpoint/README.md)｜[中文](auto-checkpoint/README.zh.md) |
+| `thinking-guard/` | 约 760 行（`lib/` 三个文件，含急停阀），**零宿主服务依赖** | [中文](thinking-guard/README.md)｜[English](thinking-guard/README.en.md) |
+| `auto-checkpoint/` | 4,292 行，8 个宿主服务 | [中文](auto-checkpoint/README.md)｜[English](auto-checkpoint/README.en.md) |
 
-## Recommended thresholds (`dsh-auto-checkpoint`)
+## 阈值推荐（`dsh-auto-checkpoint`）
 
-| Your window | task boundary | handoff / compaction |
+| 你的窗口 | 任务边界 | 落档 / 换会话 |
 |---|---|---|
-| 256K (DSH default) | 150k | 180k |
+| 256K（DSH 默认） | 150k | 180k |
 | ≥512K | 250k | 350k |
 
-`350k` is a **comfort ceiling, not a ratio** — a bigger window is not a reason to raise it.
+`350k` 是**舒适上限、不是比例** —— 窗口再大也别往上加。
 
-## Changing the thresholds (no restart)
+## 怎么调阈值（不用重启）
 
-Two entry points, and **both edit the same config — use whichever you can see**:
+面板有两个入口，**看到哪个用哪个，改的是同一份配置**：
 
-- **with the desktop-pet plugin `dsh-cost-whale`** — the panel lives in that pet's menu;
-- **without it** — this plugin ships its own **floating panel in the bottom-right corner**, collapsed to a small
-  button; click to get the three sliders, the "hand off when done" checkbox and the mode dropdown.
+- **装了桌宠插件 `dsh-cost-whale`** —— 面板就在桌宠的菜单里，点开就是滑块；
+- **没装桌宠也没关系** —— 本插件自带一个**右下角浮动面板**，默认收成一个小按钮，点一下展开：
+  三个滑块、「干完这些就换新会话」勾选框、模式下拉都在里面。
 
-If the floating panel does not appear on its own, force it with `?acfloat=1`, e.g.
-`http://127.0.0.1:3081/?acfloat=1`. (If the URL already carries `?token=...`, **do not add another question
-mark** — just append `#acfloat` at the very end.)
+浮动面板没自动冒出来的话，在地址后面加 `?acfloat=1` 强制打开，例如 `http://127.0.0.1:3081/?acfloat=1`。
+（地址里已经带着 `?token=...` 这类参数时**别再加问号**，直接在最末尾加 `#acfloat` 就行。）
 
-Dragging a slider takes effect **at runtime** (the panel POSTs to the runtime config route, updating memory and
-disk together) — **no restart**. Only the keys in the package's `cordis.patch.yml` need a restart.
+拖动滑块是**运行时生效**的（面板往运行时接口发一次 POST，内存和磁盘同时更新），**不用重启**；
+只有改包里 `cordis.patch.yml` 的那些键才需要重启。
 
-## Status
+## 状态
 
-- **AS-IS**, MIT.
-- Verified against DSH **0.2.0-rc.2**. Both plugins use internal DSH services and events, so **a major upgrade may
-  break them together**.
-- Not battle-tested at scale; forks and PRs welcome.
+- **AS-IS**，MIT。
+- 验证过的版本：DSH **0.2.0-rc.2**。两个插件都用了 DSH 的内部服务与内部事件，**大版本升级可能一起失效**。
+- 没在规模化真实环境里验证过；欢迎 fork / PR。

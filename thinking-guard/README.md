@@ -1,125 +1,118 @@
 # thinking-guard
 
-A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) plugin that folds degenerate, looping "thinking" blocks out of the history the model sees.
+**[English](README.en.md) | 中文**
 
-## What it fixes
+一个 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 插件：把已经退化成复读的「思考」块，从模型可见的历史里折叠掉。
 
-DSH sends historical `reasoning` blocks back upstream (`@deepseek-ai/dsh-llm-pi-ai` maps `reasoning` to `thinking`). So once a model starts looping, the damage is not limited to that one step: the looping block stays in the context and is re-sent on every following step and turn.
+## 它治什么
 
-Compaction does not save you here. The default `retainRatio` "keep the tail verbatim" policy tends to retain exactly that block, and compaction only runs on `agent/pre-step` — it cannot reach inside a single generation.
+DSH 会把历史里的 `reasoning` 块回传给上游（`@deepseek-ai/dsh-llm-pi-ai` 把 `reasoning` 映射成 `thinking`）。所以模型一旦复读，坏掉的不只是那一步：那条复读块会留在上下文里，之后每一步、每一轮都被重新发一遍。
 
-In a request body we captured, one 15,955-character loop reappeared as the body of an assistant message on the next request (`content` length 15,986).
+压缩救不了它。默认 `retainRatio` 的「逐字保留尾」正好会把这段复读包含进去，而压缩只在 `agent/pre-step` 触发，管不到一次生成内部。
 
-## What it does
+我们抓到的真实请求体里，一条 15,955 字符的复读，下一次请求时以 assistant 消息正文的形态出现（`content` 长度 15,986）。
 
-Before each step, it sweeps the surface nodes it has not checked yet. When an assistant message contains a degenerate looping reasoning block, the node — **together with the tool results it triggered** — is replaced in place by a single `user/message`, whose body is a short fold note.
+## 它做什么
 
-- The log stays append-only; nothing is deleted from it.
-- In the model-visible history, that step is just the note.
-- The human-facing transcript is unaffected (the replacement copy is model-only; the transcript uses the original append event).
+每一步请求之前，扫一遍「还没检查过」的 surface 节点。凡是 assistant 消息里含退化复读的 reasoning 块，就把那个节点（**连同它调起的工具结果**）用一条 `user/message` 等价替换掉，正文换成一段折叠说明。
 
-The note reads:
+- 日志仍然只追加，原文一个字都没删；
+- 模型可见的历史里，那一步只剩说明；
+- 人看的会话记录不受影响（替换副本是 model-only 的，transcript 用的是 append 原点事件）。
+
+折叠说明长这样：
 
 ```
-⟪thinking-guard⟫ the previous step's thinking degenerated into a loop and was folded out of the model-visible history.
+⟪thinking-guard⟫ 上一步的思考退化成了复读，已从模型可见历史中折叠。
 ```
 
-## How "degenerate" is decided
+## 怎么判断「退化」
 
-Two things only: the length of the repeating unit, and its share of the whole block. Defaults:
+判据只看两件事：重复单元的**长度**和它占整块思考的**比例**。默认值：
 
-| Config | Default | Meaning |
+| 配置 | 默认 | 含义 |
 |---|---|---|
-| `minChars` | 400 | ignore blocks shorter than this |
-| `minRepeats` | 25 | the unit must repeat at least this many times |
-| `maxUnit` | 30 | longest unit counted as "the repeat" |
-| `minShare` | 0.20 | the repeated part must be at least 20% of the block |
-| `tailChars` | 4000 | only look at this much of the block's tail |
-| `foldToolSteps` | true | fold steps that made tool calls too (see below) |
-| `dryRun` | false | log only, fold nothing — **turn this on while tuning** |
-| `rotationGuard` | true | **v2 criterion switch** (short-sentence rotation / English fragments). `false` = original criterion only |
-| `shortShareMin` | 0.35 | v2: minimum share of short segments (≤3 words) in the tail window |
-| `topUnitShareMin` | 0.50 | v2: minimum combined share of the top 5 segments |
+| `minChars` | 400 | 思考块短于这个长度就不看 |
+| `minRepeats` | 25 | 同一个单元至少重复这么多次 |
+| `maxUnit` | 30 | 算作「重复单元」的最大字符数 |
+| `minShare` | 0.20 | 重复部分至少要占整块的 20% |
+| `tailChars` | 4000 | 只看这块思考的尾部这么长 |
+| `foldToolSteps` | true | 带工具调用的步骤也折叠（见下） |
+| `dryRun` | false | 只记日志、不真折叠——**调判据时先开这个** |
+| `rotationGuard` | true | **v2 判据开关**（短句轮换 / 英文碎片）。`false` = 退回只用原判据 |
+| `shortShareMin` | 0.35 | v2：极短段（≤3 词）占尾窗段数的比例下限 |
+| `topUnitShareMin` | 0.50 | v2：最高频 5 个段合计占尾窗段数的比例下限 |
 
-## Why it folds whole spans instead of "pure thinking" steps
+## 为什么整段遮蔽，而不是只剪「纯思考步」
 
-v1 skipped steps that contained tool calls, to avoid leaving a paired `tool/result` dangling. A scan of 571 sessions and 63,735 assistant messages showed that limit threw away most of the cases:
+第一版只处理不含工具调用的步骤（怕单独遮蔽助手消息会让配对的 `tool/result` 悬空）。后来扫了全机 571 个会话、63,735 条 assistant 消息才发现这个限制放弃掉了多数情形：
 
-- of the 24 blocks that matched the degenerate criterion, **17 (71%) contained tool calls**;
-- for context: **96.6%** of assistant messages contain a `tool-call`.
+- 命中退化判据的块共 24 个，其中**带工具调用的 17 个（71%）**；
+- 背景数字：**96.6%** 的 assistant 消息都带 `tool-call`。
 
-It now replaces a **contiguous span across node types** with one `user/message` (`surfaceOp: { op: 'replace', startSeq, endSeq }`). When the pairing is incomplete it does not fold; it waits for the result to land in the surface and retries on the next pre-step.
+现在的做法是用一条 `user/message` 替换覆盖**跨类型的连续节点段**（`surfaceOp: { op: 'replace', startSeq, endSeq }`）。配对不完整时**不替换**，等结果落进 surface 之后的下一次 pre-step 再处理。
 
-The replacement uses a core event type (`user/message`) on purpose: custom event types cannot carry the `ignorable` marker in-process, and the loader rejects them.
+用核心事件类型（`user/message`）而不是自定义类型，是因为只有核心类型才能持久化：自定义事件类型在进程内没法带 `ignorable` 标记，加载器会拒绝。
 
-## Installing
+## 安装
 
-It is a plain cordis plugin (exports `name` and `apply`) with no host-service dependencies — it only listens on `agent/pre-step` and takes `agent.session` from the payload. Two ways to mount it:
+它是个标准的 cordis 插件（导出 `name` 和 `apply`），不依赖任何宿主服务——只监听 `agent/pre-step`，从 payload 里拿 `agent.session`。两种装法：
 
-1. **Inside an agent preset** (what we do now): add an entry to the preset's `agent.cordis.yml` pointing `name` at this file.
-2. **As a host-level plugin** (applies to every preset): add an entry to your profile's plugin tree.
+1. **挂进某个 agent preset**（我们现在是这么用的）：在 preset 的 `agent.cordis.yml` 里加一条，`name` 指向这个文件。
+2. **挂成宿主级插件**（对所有 preset 生效）：在 profile 的插件树里加一条。
 
-> **Update 2026-10-14: both options have now been tested.** The host-level mount was verified in an isolated environment — a
-> headless profile with **no preset section** — where the session finished normally (exit code 0) and the plugin logged
-> `apply 被调用：enabled=true` followed by `sweep 首次：surface 0 节点`. When mounting host-wide, declare
-> `inject: [agents]` on the entry (that is what our experiment used).
+> **2026-10-14 补：两种装法都实测过了。** 宿主级挂法在隔离环境里跑通——用的是一个**没有 preset 段**的 headless profile，
+> 会话正常结束（退出码 0），插件日志里打出 `apply 被调用：enabled=true` 和 `sweep 首次：surface 0 节点`。
+> 挂宿主层时要在条目里声明 `inject: [agents]`（照我们实验用的写法）。
 >
-> **Which option should you pick? We recommend option 2 (host level).** The reason only became clear on
-> 2026-10-14: looping degeneration is the **model's own** behaviour under long context — it has nothing to do with
-> which preset is mounted. Mounted inside a preset, only sessions that select that preset are protected. We hit exactly
-> that trap here: a 384-turn `standard` session that compacted repeatedly ran with **no protection at all**
-> (`⟪thinking-guard⟫` appears **0 times** in its log).
-> ⚠️ And the converse matters too: **"my standard sessions never degenerated" does not prove they don't need this** —
-> only our we-need sessions had the detector mounted, so a standard session could degenerate and leave **no trace at all**
-> (a selection bias).
+> **该挂哪一种？我们建议第 2 种（宿主层）。** 理由是 2026-10-14 才想明白的一件事：
+> 复读退化是**模型自身**在长上下文下的行为，跟哪个 preset 无关；
+> 而挂在 preset 里，**只有选了那个 preset 的会话**才受保护。我们本机就吃了这个亏 ——
+> 一个 384 轮、反复压缩的 `standard` 会话**从头到尾没有保护**（日志里 `⟪thinking-guard⟫` 出现 **0 次**）。
+> ⚠️ 反过来也要知道：**"standard 会话没出过毒化"不能证明它不需要保护** ——
+> 本机只有 we-need 挂了检测器，standard 会话真毒化了也**不会留下任何记录**（这是选择偏差）。
 
-## Tuning
+## 调判据
 
-Run with `dryRun: true` for a day and watch how often it fires and what it matches, then decide whether to fold for real. Hits are logged through `ctx.logger` (`info`): which seq was folded, how many characters, and what the repeating unit was.
+先用 `dryRun: true` 跑一天，看日志里命中多少次、命中长什么样，再决定要不要真的折叠。命中记录写在 `ctx.logger`（`info` 级）里，日志里能看到折叠了哪个 seq、多少字符、重复单元是什么。
 
-A failed fold never breaks the step: the error is swallowed and logged as `warn`.
+折叠失败不会影响本步：异常被吞掉并记 `warn`，这一轮照常请求。
 
-## Known limits
+## 已知的边界
 
-- The criterion looks at **character-level repetition**; there is no semantic judgement. A model that loops with different wording every time will not be caught.
-- **Both Chinese and English match** (measured: a Chinese sentence ×30 and an English sentence ×30 both hit, `share=100%`). Splitting uses `/[。！？!?\n]+|\.\s+/`; a "meaningful" character is `A-Za-z0-9` or a CJK ideograph.
-- ⚠️ **Two gaps on the English side — know them before you rely on this**:
-  1. **`maxUnit: 30` was tuned for Chinese** — 30 Chinese characters is roughly one sentence, while 30 English characters is about five words.
-     Measured: an English 53-character sentence repeated 30 times → **no hit** (skipped by `maxUnit`). ⇒ For English, raise it (start around 80).
-  2. **"Same template, different words" loops are missed**: the detector requires the **exact same unit** to repeat ≥25 times.
-     Measured: `Let me check / Let me look / Let me verify` 10× each → **no hit**; `Let me examine item N.` with N incrementing → **no hit**.
-     English loops are often exactly this shape (Chinese loops are more often verbatim copies, so the Chinese side fares better).
-- 🛑 **Do not use "frequent phrases" as a criterion**: in one 379-turn English session (9,008 steps) we counted `Hmm` **39,648** times,
-  `Let me check` **8,610**, `Let me do` **7,604**. Those are the normal texture of thinking, not a degeneration signal. The detector looks at
-  **repetition density inside the tail window** (`tailChars: 4000`, same unit ≥25 times and ≥20% of sentences), not global word frequency.
-  ⇒ **On English, run with `dryRun: true` first** — we have no calibration data for English (the Chinese calibration was "235 sessions
-  machine-wide: recall 7/7, 11 extra triggers").
-- ⚠️ **The English side used to be a blank — as of 2026-10-14 it is not. Here is what happened.**
-  - The original criterion only measures **one** unit's share of the window's segments (`minShare: 0.20`). English degeneration is
-    usually **several short sentences rotating**: `Let me write it.` → `Go.` → `Now.` → `OK.` → `Writing.` — the 4,000-char tail
-    splits into 300+ segments, each short phrase holds ~15%, **none reaches 20%** ⇒ the whole block passes. Measured: **0/3 recall**;
-    and of every block machine-wide with ra≥20, **all 8 English-dominant ones were stopped by that gate**.
-  - **Three real samples** (all in sessions where this plugin was **not** mounted — which is why the logs are silent):
+- 判据看的是**字符层面的重复**，不做语义判断。模型如果换着花样绕圈（每次措辞都不同），它抓不到。
+- **中英文都能匹配**（实测：中文短句 ×30 与英文短句 ×30 都命中，`share=100%`）。切句用 `/[。！？!?\n]+|\.\s+/`，实义字符含 `A-Za-z0-9` 和汉字。
+- ⚠️ **英文有两个缺口，用之前先知道**：
+  1. **`maxUnit: 30` 是按中文定的** —— 中文 30 字差不多一句话，英文 30 字符只有 5 个词左右。
+     实测：英文 53 字符的重复句 ×30 次 → **未命中**（被 `maxUnit` 跳过）。⇒ 英文环境把它调大（建议从 80 起试）。
+  2. **「同句式换词」的复读抓不到**：判据要求**完全相同的单元**重复 ≥25 次。
+     实测 `Let me check / Let me look / Let me verify` 各 10 次 → **未命中**；`Let me examine item N.`（N 递增）→ **未命中**。
+     而英文复读恰恰常是这种形态（中文复读更多是逐字复制，所以中文侧更灵）。
+- 🛑 **别拿"高频词"当判据**：我们统计过一个 379 轮的英文会话（9,008 步）——`Hmm` 出现 **39,648 次**、`Let me check` **8,610 次**、`Let me do` **7,604 次**。
+  那些是**正常思考的常态**，不是复读信号。判据看的是**尾部窗口内的重复密度**（`tailChars: 4000` 内同一单元 ≥25 次、且占窗口句数 ≥20%），不是全局词频。
+  ⇒ **英文场景请先开 `dryRun: true` 观察**——我们没有英文语料上的校准数据（中文侧的校准是"全机 235 会话召回 7/7、额外触发 11"）。
+- ⚠️ **英文侧原本是空白 —— 2026-10-14 补上了，下面是过程**
+  - 原判据只看「**单个**单元占窗口句数的比例」（`minShare: 0.20`）。而英文退化常是**多个短句轮换**：
+    `Let me write it.` → `Go.` → `Now.` → `OK.` → `Writing.` —— 尾部 4000 字符被切成 300+ 段，每个短词只占 ~15%，
+    **没有一个够 20%** ⇒ 整块放行。实测 **0/3 召回**；全机 ra≥20 的块里，**英文为主的 8 个全被这道门拦掉**。
+  - **3 个真样本**（都在**没挂本插件**的会话里 —— 所以日志里一个字记录都没有）：
 
-    | Date | Session | Preset | Block | ra (top repeat) | Original criterion |
+    | 时间 | 会话 | 模式 | 块长 | ra（同一句最高重复） | 原判据 |
     |---|---|---|---|---|---|
     | 09-16 | `9f419776` seq147 | standard | 18,793 | `Go.`×44 | ❌ |
     | 09-20 | `4795bd89` seq677 | cordis | 38,785 | `OK.`×105 | ❌ |
     | 09-23 | `a09aa199` seq3006 | standard | 29,371 | `Let me write.`×67 | ❌ |
 
-    In the 38,785-char one, `Let me write the tool call.` appears **180** times, and the model even wrote
-    `(I apologize for the loop; producing the call.)` itself.
-  - ⇒ There is now a second criterion, `detect-v2.mjs` (`rotationGuard`, on by default): within the same tail window,
-    **short segments (≤3 words) ≥ 0.35** and **top-5 segments together ≥ 0.50**. Measured: **3/3 recall** and **0 false positives
-    on 12,203 normal English blocks** (worst normal block 0.41 vs lowest real sample 0.53 — the threshold sits in the gap).
-    It only fires **after** the original criterion passes a block, and it is deliberately **not** wired into the shared `detect`
-    that the emergency valve uses (that action is `agent.cancel`, harsher than folding).
-  - 🛑 And still do not use "frequent phrase" as a criterion: in one 379-turn English session (9,008 steps) `Hmm` appeared
-    **39,648** times and `Let me check` **8,610** — that is the normal texture of thinking.
-    ⇒ **On English, still start with `dryRun: true` for a day**: the v2 thresholds were set from 3 samples + 12,203 normal blocks
-    on one machine. They are not universal constants.
-- ⭐ **A side finding worth more than the English question**: among the sessions with hits, `3867d102` and `98e0ff60`
-  have **no fold record at all** — they ran `standard`, where no detector was mounted. That is the selection bias above, measured.
-- The file is `escape-valve.mjs` but the plugin name it exports is `loop-valve`. That mismatch is still there.
+    38,785 那一次里 `Let me write the tool call.` 出现 **180 次**，中间还有它自己写的
+    `(I apologize for the loop; producing the call.)`。
+  - ⇒ 现在有第二把尺子 `detect-v2.mjs`（`rotationGuard`，默认开）：同一尾窗内 **极短段（≤3 词）占比 ≥0.35**
+    且 **最高频 5 段合计 ≥0.50**。实测 **3/3 命中**、**12,203 个正常英文块 0 误伤**
+    （正常块最坏 0.41，真样本最低 0.53，阈值落在空隙中间）。
+    它**只在原判据放行之后**才补刀；且**没有塞进急停阀共用的 `detect`**（阀的动作是 `agent.cancel`，比折叠更猛，不该连坐）。
+  - 🛑 仍然别拿"高频词"当判据：我们统计过一个 379 轮的英文会话（9,008 步）——`Hmm` 出现 **39,648 次**、
+    `Let me check` **8,610 次**，那些是正常思考的常态。⇒ **英文场景仍建议先开 `dryRun: true` 跑一天**：
+    v2 的阈值是在**单机 3 个样本 + 12,203 个正常块**上定的，样本量小，别当普适常数。
+- ⭐ **比英文问题更值得记的一条**：有命中记录的会话里，`3867d102`、`98e0ff60` **从头到尾没有折叠记录** ——
+  它们跑的是 `standard`，那里压根没挂检测器。上面那条选择偏差，这就是它的实测版本。
 
 ---

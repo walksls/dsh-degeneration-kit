@@ -13,8 +13,8 @@
   "files": [
     "index.js",
     "cordis.patch.yml",
+    "README.en.md",
     "README.md",
-    "README.zh.md",
     "LICENSE",
     "test"
   ],

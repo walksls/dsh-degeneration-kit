@@ -1,214 +1,200 @@
 # dsh-auto-checkpoint
 
-A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) plugin that
-watches session token pressure. At a configurable threshold it asks the model to
-write a project checkpoint file into the workspace and — optionally — hands the
-work to a fresh session seeded with a continue instruction, so the old session
-stops consuming context.
+**[English](README.en.md) | 中文**
 
-## What it fixes
+一个 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 插件：
+监控会话上下文 token 压力，到达阈值时自动要求模型把项目状态写成检查点文件，
+随后（可选）自动创建新会话、把「继续干」的指令喂进去，旧会话不再消耗上下文。
 
-Long sessions degrade: recall of the earliest content drops and every request
-re-prices the whole history. Instead of letting one session balloon to the
-window edge (and re-introducing bugs already fixed early on), leave a checkpoint
-at the threshold and continue in a new session.
+## 它解决什么问题
 
-## How it works
+上下文越长，模型对最开头信息的召回越差、单次请求越贵。与其让一个会话无限
+堆到窗口边缘（并反复犯早期已经修好的 bug），不如在阈值处留一个检查点，换
+新会话继续。
 
-| Phase | What happens |
+## 工作机制
+
+| 阶段 | 发生什么 |
 |---|---|
-| watching | Before each step, prices the session via `ctx.tokenMeter.measure(session).totalTokens`; below threshold: no-op |
-| requested | Above threshold: appends one plugin-sourced user message asking the model to write the project state to `checkpointPath` with its `write` tool |
-| handoff | Once the file has landed (non-empty): `goals.pause()` stops the old session's active goal, then after `whenIdle()` `sessionController.create()` makes a new session (same cwd, same agent preset), the parent's **permission preset** and **model selection** are handed down to it, and `sessionController.prompt()` feeds the continue instruction; the old session parks |
-| parked | The old session's every further step is rejected at `agent/pre-step`, so it converges to idle and stops spending tokens |
-| checkpoint-only | With `autoNewSession: false`: only the checkpoint file is written; the session keeps running |
+| watching | 每轮第一步前量 `ctx.tokenMeter.measure(session).totalTokens`；低于阈值不动作 |
+| requested | 超过阈值：注入一条插件署名 user 消息，要求模型用 `write` 工具把项目状态写入 `checkpointPath` |
+| handoff | 确认文件已落盘（非空）后：先 `goals.pause()` 停掉旧会话的活跃 goal，再 `whenIdle` → `sessionController.create()` 建新会话（同 cwd、同 agent preset）→ 把父会话的**权限预设**和**模型选择**交给子会话 → `prompt()` 喂入继续指令，旧会话转为 parked |
+| parked | 旧会话的后续步骤一律被 `agent/pre-step` 拒绝，收敛到 idle，不再产生 token 消耗 |
+| checkpoint-only | `autoNewSession: false` 时只写文件，会话继续跑 |
 
-- Safety net: while the model has not written the file, a short reminder is
-  injected every `remindEverySteps` steps, so a stalled write cannot silently
-  balloon toward the window edge.
-- Parking is a pre-step **rejection**, not a kill: the in-flight step finishes,
-  then the session settles naturally.
-- **Only a genuine human message reopens a parked session.** Goal rounds
-  (`<goal_round>`), background-job notices and subagent reports are automatic
-  injections and stay rejected — otherwise the old session is read as "the user
-  is back", un-parks, and works in the same workspace as its own successor
-  (hit in production on 2026-09-17; see the regression tests in `test/`).
-- The pause applies to the **old** session's goal; goals never cross sessions,
-  so the successor arms its own from the checkpoint file.
-- **The permission preset is inherited.** A published child starts from the
-  profile's default knobs (`workspace-write` + `ask`); the plugin then hands the
-  parent's preset down with `ctx.permissionPresets.set`, so a session you
-  switched to "full access" hands its successor the same access. Without it the
-  child silently comes back weaker and stalls on writes outside the workspace
-  (seen 2026-09-17: `095fb27a` ran with full access, its child `27175d59`
-  started as `workspace-write`). A `custom` parent preset logs a warning
-  instead of being guessed at.
-- **The model selection is inherited too.** `sessionController.create()` builds
-  the child from the deployment's default model, so a session you switched to
-  another model (or another reasoning effort) used to relay into a child running
-  on the default. The plugin reads the parent's live selection from the
-  `modelSelection` projection (`pending ?? lastUsed`) and installs it on the
-  child with `sessionController.selectModel` — the same call the GUI makes, so an
-  unavailable model cannot be installed — before the continue prompt. A parent
-  already sitting on the default is skipped: the child starts there anyway, and
-  `selectModel` would only re-save that default.
+- 提醒兜底：模型迟迟不写检查点文件时，每 `remindEverySteps` 步注入一次
+  简短提醒，避免静默膨胀到窗口边缘。
+- 停旧会话用的是 pre-step **拒接**，不是强杀：当前进行中的一步会执行完，
+  之后自然停下来。
+- **只有真人消息能唤醒 parked 会话**。goal 轮（`<goal_round>`）、后台任务通知、
+  子代理回报都是自动注入，一律拒绝——否则旧会话会被"当成用户回来了"而解除
+  parked，和自己的后继在同一个工作区里并发干活（2026-09-17 实测踩到，后来补了回归测试覆盖这条）。真人回到旧窗口发消息则恢复正常聊天（不再自动
+  检查点）。
+- 交棒时暂停的是**旧会话**的 goal；goal 不跨会话，新会话按检查点文件自己重新
+  立目标。
+- **权限预设会继承**：子会话刚建出来时用的是 profile 默认旋钮
+  （`workspace-write` + `ask`），插件随后把父会话的预设交给它（`ctx.permissionPresets.set`），
+  所以你在界面上切到「完全权限」的会话，交棒后子会话仍是完全权限。否则子会话会
+  悄悄变弱、在工作区外的写入上卡住（2026-09-17 实测：`095fb27a` 是完全权限，
+  它的子会话 `27175d59` 却回到 `workspace-write`）。父会话若是 `custom`
+  （旋钮不匹配任何预设），插件只记录一条 warn，不猜测。
+- **模型选择也会继承**：`sessionController.create()` 建子会话时取的是部署默认
+  模型，所以你在会话里换过模型（或换过推理档位）的话，交棒后会掉回默认模型。
+  插件从 `modelSelection` 投影读父会话当前选择（`pending ?? lastUsed`），在继续
+  指令之前用 `sessionController.selectModel` 装到子会话上——就是界面切模型用的
+  同一个接口，因此不可用的模型装不上。父会话本来就在默认模型上时跳过：子会话
+  天生就在那儿，再调一次只会把同一个默认值重存一遍。
 
-## Install
+## 安装
 
 ```bash
-dsh plugin --profile web add /absolute/path/to/dsh-auto-checkpoint
+dsh plugin --profile web add /绝对/路径/dsh-auto-checkpoint
 ```
 
-The package declares `dsh.bundle.patch`, so installation hooks it into the
-profile's bundle layer stack automatically.
+包声明了 `dsh.bundle.patch`，安装时自动加入 profile 的 bundle 层栈。
 
-## Config
+## 配置
 
-In the profile's `cordis.patch.yml`:
+在 profile 的 `cordis.patch.yml` 中配置（默认值即上面文件里的示例）：
 
 ```yaml
 - id: auto-checkpoint
   config:
-    triggerTokens: 300000
-    checkpointPath: checkpoint.md
-    autoNewSession: true
-    continuePrompt: 'This is a new session. First read {{path}} …'
-    remindEverySteps: 3
+    triggerTokens: 300000     # token 触发阈值
+    checkpointPath: 'checkpoint-{{session}}.md'  # 每个会话写自己的文件
+    autoNewSession: true      # true: 写完后自动开新会话并停旧会话
+    continuePrompt: '这是新会话。请先读取工作区中的 {{path}} …'  # 喂给新会话的首条消息
+    remindEverySteps: 3       # 检查点迟迟未写入时的提醒间隔
 ```
 
-| Field | Type | Default | Meaning |
+| 字段 | 类型 | 默认值 | 作用 |
 |---|---|---|---|
-| `triggerTokens` | number | `300000` | Token pressure threshold. Keep margin: metering is heuristic (4 chars ≈ 1 token; CJK underpriced) |
-| `checkpointPath` | string | `checkpoint.md` | Checkpoint file, relative to the session cwd or absolute |
-| `autoNewSession` | boolean | `true` | `false`: write the checkpoint only, keep the session |
-| `continuePrompt` | string | see README | First message of the new session; `{{path}}` is replaced with the checkpoint path |
-| `remindEverySteps` | number | `3` | Reminder cadence while the checkpoint is pending |
+| `triggerTokens` | number | `300000` | 到达该 token 压力后触发检查点。留足余量：token 计量是估算（4 字符≈1 token，中文会低估） |
+| `checkpointPath` | string | `checkpoint-{{session}}.md` | 检查点文件路径，相对会话 cwd 或绝对路径。**`{{session}}` 会替换成会话短 id**（如 `checkpoint-9b1a8732.md`），接力链上每一棒写自己的文件、互不覆盖；写成不带占位符的固定名（如 `checkpoint.md`）则退回单文件行为 |
+| `autoNewSession` | boolean | `true` | `false` 时只写检查点，不换会话（面板上就是「写完后自动开新会话」开关） |
+| `continuePrompt` | string | 见 README | 新会话的第一条消息；`{{path}}` 替换成**该会话自己的**检查点路径 |
+| `remindEverySteps` | number | `3` | requested 阶段每隔几步提醒一次写入 |
 
-### Choosing the thresholds (three numbers, and they must stay ordered)
+### 长任务接力
 
-Three watermarks with three different jobs:
+配置是**全局的**（存 `~/.dsh/auto-checkpoint.json`），跨会话、跨 web 重启都保留。
+`autoNewSession: true` 时，接力链自动进行：会话 A 越阈值 → 写 `checkpoint-A.md`
+→ 自动创建会话 B 并喂「读 `checkpoint-A.md` 继续」→ B 越阈值 → 写
+`checkpoint-B.md` → 创建 C……因为每棒的文件名带自己的会话 id，**检查点不会
+互相覆盖**，理论上可一直接力到任务完成。
 
-| Key | Code default | Job | Our value |
+### 阈值怎么定（三个数，必须有序）
+
+它有三个水位，管的事完全不同：
+
+| 键 | 代码默认 | 作用 | 本机在用的 |
 |---|---|---|---|
-| `taskBoundaryTokens` | 150,000 | task boundary: fires when a todo completes | **250,000** |
-| `triggerTokens` | 300,000 | pressure threshold: write a checkpoint → **hand off to a fresh session** | **350,000** |
-| `remindTokens` | 400,000 | **reminder only** ("you should compact"), takes no action | **350,000** |
+| `taskBoundaryTokens` | 150,000 | 任务边界：完成一个 todo 就提醒落档 | **250,000** |
+| `triggerTokens` | 300,000 | 压力阈值：到点写检查点 → **接棒换会话** | **350,000** |
+| `remindTokens` | 400,000 | **只提醒你**「该手动压缩了」，不做任何动作 | **350,000** |
 
-**0. Find out your model's context window first.** All three are **absolute token counts** — the plugin does **not**
-adapt to the window (there is no such logic in the code).
-- **DSH's own default is 256K**: the adapter falls back to `262144`, and the settings page hints `256K`
-  (`dsh-client-ui-settings-models/lib/client.js:559-561`).
-- **We raised ours to 1M ourselves** (`contextWindow: 1048576` in our profile) — **that is not the default**.
-- ⇒ The 250k/350k numbers below assume a **≥512K** window. On 256K they must be scaled down (table below).
+**0. 先查出你的窗口（这一步不能跳）。** 三个数都是**绝对 token 数**，插件**不会按窗口自适应**（代码里没有这层逻辑）。
+- **DSH 官方默认是 256K**：适配器的回退值是 `262144`，设置页的提示就写作 `256K`
+  （`dsh-client-ui-settings-models/lib/client.js:559-561`）。
+- 本机是**自己把窗口调到 1M 的**（profile 里 `contextWindow: 1048576`）——**这不是默认值**。
+- ⇒ 下面的 250k/350k 是**配 ≥512K 窗口**的；你若用 256K，必须按表往下缩。
 
-**1. Keep them ordered**: `taskBoundaryTokens < triggerTokens`.
+**1. 必须有序**：`taskBoundaryTokens < triggerTokens`。
 
-**2. "Auto-compact" and "auto-handoff" are mutually exclusive, per session** (since 2026-10-11, `index.js:2899-2911`):
-- tick a session's *auto-compact* ⇒ the **whole handoff path is skipped** for that session
-  (no checkpoint nudge, no new session, no freezing the old one) — it stays alive on compaction;
-- unticked ⇒ handoff runs normally (at `triggerTokens` it writes the checkpoint and hands off).
+**2. 「自动压缩」和「自动接棒」是二选一，不是两个独立开关**（2026-10-11 起，代码在 `index.js:2899-2911`）：
+- 给某个会话勾上「自动压缩」⇒ 该会话**交棒整条路不走**（不催写检查点、不开新会话、不冻结旧会话）——它靠压缩一直活着；
+- 不勾 ⇒ 交棒照常运行（到 `triggerTokens` 就写检查点、换会话）。
 
-That is why our `remindTokens` may **equal** `triggerTokens`: sessions that opted into compaction never take the
-handoff path, so the two never race.
+⇒ 这也是为什么本机的 `remindTokens` 敢和 `triggerTokens` **相等**：勾了压缩的会话根本不走接棒那条路，两条路不会打架。
 
-**3. Recommended values**:
+**3. 推荐档位**：
 
-| Your window | `taskBoundaryTokens` | `triggerTokens` | `remindTokens` |
+| 你的窗口 | 任务边界 | 落档/接棒 `triggerTokens` | 提醒 `remindTokens` |
 |---|---|---|---|
-| **256K (DSH default)** | 150k | 180k | 180k |
+| **256K（官方默认）** | 150k | 180k | 180k |
 | **512K** | **250k** | **350k** | **350k** |
-| **1M (we raised ours)** | **250k** | **350k** | **350k** |
+| **1M（本机是自己调的）** | **250k** | **350k** | **350k** |
 
-- **512K and 1M use the same numbers** ⇒ **350k is an absolute comfort ceiling, not a ratio**: a bigger window is not
-  a reason to raise it (more expensive, slower, higher degeneration risk). Past ~350k, hand off.
-- Only windows **below 512K** need to scale down: on 256K use 180k (≈ 69% of the window) with a 150k boundary.
-- The 512K/1M rows are the values **we actually run**; the 256K row is a **proportional estimate, not measured on a
-  small window**.
-- 🛑 Copying our numbers onto a 256K window breaks in two ways: `triggerTokens=350k` **never fires** (the plugin looks
-  dead), and `taskBoundaryTokens=250k` sits at ~95% of the window, so the checkpoint lands when you are nearly out of room.
+- **512K 和 1M 是同一组数** ⇒ **350k 是"绝对值舒适上限"，不是比例**：窗口再大也别往上加
+  （更贵、更慢、退化风险更高），**到 350k 就该接棒**。
+- **只有窗口小于 512K 才需要往下缩**：256K 用 180k 落档（≈ 窗口 69%）、150k 边界。
+- 出处：512K/1M 两行是**本机正在跑的实测档**；256K 那一行是**按比例推的建议，没在小窗口实测过**。
+- 🛑 **直接把本机的数抄给 256K 会出两种毛病**：`triggerTokens=350k` **永远不触发**（看起来像插件坏了）；
+  `taskBoundaryTokens=250k` 贴着窗口顶（250k/262k ≈ 95%），会在几乎溢出的位置才落档。
 
-**4. Why we hand off at 350k even with a 1M window**: past that point a larger window buys little — requests get slower
-and more expensive, and longer context raises the risk of degeneration (loops). Handing off around 350k is simply more stable.
+**4. 为什么 1M 窗口也只用到 350k（33%）**：到这个量级，**窗口再大也不会让接棒点更划算** ——
+单轮请求更贵更慢、上下文越长退化（复读）风险越高 ⇒ **350k 左右接棒反而最稳**。
 
-### Old sessions (600K+) may refuse to compact — don't fight it
+### 老会话（600K+）可能压不动 —— 别死磕
 
-**Measured (2026-10-07)**: a session that had grown to **684K** failed manual compaction twice, with nothing but
-`Compaction could not produce a useful summary` shown in the UI.
+**实测（2026-10-07）**：一个已经长到 **684K** 的老会话，两次手动压缩全部失败，界面上只看到
+`Compaction could not produce a useful summary`。
 
-The real cause is recorded in the session log under `compaction/end.data.error`, and it is an **upstream rejection**:
+真因记在会话日志的 `compaction/end.data.error` 里，是**上游拒绝**：
 
 ```
 503: {"code":11133,"msg":"Invalid request parameters"}
 extError: model_param_invalid
-outer code: no_healthy_account
+外层 code: no_healthy_account
 ```
 
-⇒ **It is not necessarily your session that is broken** — DSH retried twice and gave up, and other sessions on the same
-account compacted fine at that moment. Whether the very long context contributed to the rejected parameters cannot be
-told from the log, so don't blame "the session is too old" right away.
+⇒ **不一定是你的会话坏了** —— 那次是渠道拒绝（DSH 自己 `llm/retry` 两次后放弃），
+同一账号下、当时别的会话压缩是**成功的**。至于"超长上下文是不是撑出了参数超限"，
+日志区分不了，先别急着归因给"会话太老"。
 
-**To rescue such a session**: stop retrying compaction. **Open a new session** and have it read the old session's
-**reasoning + user messages**, **skipping tool calls as noise** (those are often tens of thousands of characters).
+**要救这个老会话**：别反复压。**开一个新会话**，让它去读老会话的**思考 + 用户回答**，
+**把工具调用当噪音跳过**（那些动辄几万字符，读它们纯属烧钱）。
 
-### It is one half of a pair with `thinking-guard` (use both)
+### 它和 `thinking-guard` 是一对，建议一起用
 
-| | What it does | When |
+| | 干什么 | 时机 |
 |---|---|---|
-| `thinking-guard` | folds a degenerate reasoning block out of the **model-visible history** | **immediately** (next pre-step, before the block is re-sent many times) |
-| this plugin (compaction / handoff) | clears **accumulated** pollution wholesale, or moves to a fresh session | **afterwards** (once a watermark is reached) |
+| `thinking-guard` | 把退化的思考块从**模型可见的历史**里折叠掉 | **当场**（下一次 pre-step，趁它还没被反复回传） |
+| 本插件（压缩 / 接棒） | 把**已经累积**的污染整体清掉，或干脆换一个新会话 | **事后**（水位到了之后） |
 
-They are not redundant:
+两者的关系**不是重复**：
 
-- folding **cannot reach inside a single generation** — it cannot stop a loop that is being generated right now, only
-  cut it on the next step;
-- pollution that has **accumulated** over several blocks can only be cleared at once by compaction (measured locally:
-  in a session with 12 compactions, every compaction that had accumulated pollution reduced it, the strongest going
-  **43 → 0** with no recurrence afterwards).
+- 折叠**管不到一次生成内部** —— 一条复读正在生成时它拦不住，只能等下一步再剪；
+- 而**累积**起来的多块污染，只有压缩能一次性清掉（本机实测：一个会话 12 次压缩，
+  凡有累积污染时压缩后都下降，最强一次 **43 → 0**，且此后零复发）。
 
-⇒ **Neither half is complete on its own**: with folding only, misses and accumulation remain; with compaction only, every
-step between two compactions still replays the pollution.
+⇒ **只用其中一个都不完整**：光折叠，会以"漏检 + 累积"的方式留下污染；
+光压缩，两次压缩之间的每一步仍在被污染重放。
 
-## Visual tuning (Web UI)
+## 可视化调节（Web 界面）
 
-When installed into the web profile, the plugin renders an "自动检查点"
-(auto-checkpoint) section in **one of two places** — whichever exists:
+装进 web profile 后，插件会在**两个位置之一**渲染一个「自动检查点」区块（哪个存在就用哪个）：
 
-- **with the desktop-pet plugin `dsh-cost-whale`**: inside its menu
-  (bottom-right whale → top-right menu button);
-- **without it**: the plugin builds its own **floating panel in the
-  bottom-right corner**, collapsed to a small button — click to expand.
-  Force it any time with `?acfloat=1`, or `#acfloat` if the URL already
-  carries a `?token=...`.
+- **装了桌宠插件 `dsh-cost-whale`** ⇒ 在**小鲸鱼菜单**里（右下角鲸鱼娘 → 右上角三条杠
+  打开的「小鲸鱼设置」）；
+- **没装桌宠** ⇒ 插件自建一个**右下角浮动面板**（默认收成一个小按钮，点一下展开）；
+  随时可以用 `?acfloat=1` 强制打开（地址里已经有 `?token=...` 时改用 `#acfloat`）。
 
-Both panels edit the **same config**.
+两种面板改的是**同一份配置**。
 
-- **Threshold slider** 50k–1000k plus a **number input** (≥1000, no upper
-  bound); changes persist immediately to `~/.dsh/auto-checkpoint.json`
-  (your `settings.yaml` is untouched) and apply to the very next step —
-  no restart needed.
-- **Live pressure**: current session token pressure / threshold with a
-  progress bar.
-- **Toggles**: `写完后自动开新会话` (auto new session), `启用自动检查点`
-  (enabled).
-- Disabling keeps the config; reopening restores it.
+- **阈值滑轨** 50k–1000k + **数字输入框**（≥1000 无上限），改完立即持久化
+  到 `~/.dsh/auto-checkpoint.json`（不碰 `settings.yaml`），插件下个 step
+  就按新阈值走，**无需重启**；
+- **当前压力**：实时显示当前会话 token 压力 / 阈值，带进度条；
+- **开关**：`写完后自动开新会话`、`启用自动检查点`；
+- 关闭时配置保留，重新打开恢复。
 
-The runtime config file overrides the static defaults in `cordis.patch.yml`;
-missing file or fields fall back to the static config.
+运行时配置文件的优先级高于 `cordis.patch.yml` 里的静态默认值；文件缺失或
+字段缺失时回落到静态配置。
 
-## Requirements
+## 依赖
 
-- `ctx.tokenMeter` (ships with `dsh-base`) and `ctx.sessionController`
-  (ships with `dsh-web-app`). Without `sessionController` the plugin degrades
-  to checkpoint-only and logs a notice.
-- DeepSeek Harness `>= 0.1.x` (developed and tested on `0.1.5-rc.2`).
-- Node `>= 22.19`. Zero runtime dependencies.
+- 需要 `ctx.tokenMeter`（`dsh-base` 自带）与 `ctx.sessionController`
+  （`dsh-web-app` 自带）。无 sessionController 时自动降级为只写检查点并打日志。
+- DeepSeek Harness `>= 0.1.x`（在 `0.1.5-rc.2` 上开发与实测）。
+- Node `>= 22.19`。零运行时依赖。
 
-## Uninstall
+## 卸载
 
 ```bash
 dsh plugin --profile web remove dsh-auto-checkpoint
 ```
 
-## License
+## 许可证
 
 MIT
