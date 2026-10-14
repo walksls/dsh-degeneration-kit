@@ -35,6 +35,19 @@ Three reasons, and missing any one leaves a hole:
 
 ⇒ In one line: **folding = produce less, compaction = clear the stock. You need both for a closed loop.**
 
+## Measured: one session burned 2.3 billion tokens and stayed alive
+
+![Token usage of a single session](docs/session-2.3b-tokens.png)
+
+A real session's usage panel: **383 turns, 9,227 steps, 2.32 billion tokens** in total
+(99.6% cache hits) — and context usage is still only 24%.
+
+Nothing magic: `dsh-auto-checkpoint` compacts or hands off at a watermark so history cannot grow
+without bound, and `thinking-guard` folds degenerate reasoning blocks so they are not replayed every step.
+
+⚠️ This shows only that the **session survived**. It is not proof that this setup is faster or cheaper
+than any alternative.
+
 ## Install (3 minutes)
 
 → [`INSTALL.en.md`](INSTALL.en.md) (two commands + how to verify + troubleshooting)
