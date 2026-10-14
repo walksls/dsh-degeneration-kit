@@ -105,15 +105,22 @@ adapt to the window (there is no such logic in the code).
 
 **1. Keep them ordered**: `taskBoundaryTokens < triggerTokens`.
 
-**2. "Auto-compact" and "auto-handoff" are mutually exclusive, per session** (since 2026-10-11, `index.js:2899-2911`):
-- tick a session's *auto-compact* ⇒ the **whole handoff path is skipped** for that session
+**2. "Auto-compact at threshold" and "auto-handoff" are mutually exclusive, per session** (since 2026-10-11, `index.js:2899-2911`):
+- tick a session's *auto-compact at threshold* ⇒ the **whole handoff path is skipped** for that session
   (no checkpoint nudge, no new session, no freezing the old one) — it stays alive on compaction;
 - unticked ⇒ handoff runs normally (at `triggerTokens` it writes the checkpoint and hands off).
 
 That is why our `remindTokens` may **equal** `triggerTokens`: sessions that opted into compaction never take the
 handoff path, so the two never race.
 
-**3. Recommended values**:
+> ⚠️ **"Handoff" names two different things in this plugin — do not conflate them** (added 2026-10-15):
+> - **handoff** = write the checkpoint → **open a new session** → freeze the old one. The "mutually exclusive"
+>   rule above is about this one;
+> - **"post-compaction re-anchor"** (`reanchorAfterCompact`) = after a successful compaction, inject one
+>   "read the files before you act" line **into the same session**. It does **not** open a new session.
+
+**3. Recommended values** (⚠️ only meaningful for sessions that **take the handoff path**: a session ticked
+*auto-compact at threshold* never uses `triggerTokens` / `remindTokens` — it stays alive on compaction):
 
 | Your window | `taskBoundaryTokens` | `triggerTokens` | `remindTokens` |
 |---|---|---|---|
@@ -192,6 +199,8 @@ Both panels edit the **same config**.
   progress bar.
 - **Toggles**: `写完后自动开新会话` (auto new session), `启用自动检查点`
   (enabled).
+- **Per-session handling** (applies to the session you are currently viewing): *do nothing (default)* /
+  *remind me at threshold* / *auto-compact at threshold* — the last one never yields to handoff, see §2 above.
 - Disabling keeps the config; reopening restores it.
 
 The runtime config file overrides the static defaults in `cordis.patch.yml`;
