@@ -1,0 +1,39 @@
+{
+  "name": "dsh-auto-checkpoint",
+  "version": "0.1.0",
+  "description": "Watches session token pressure; at a configurable threshold it asks the model to write a project checkpoint file into the workspace, then (optionally) creates a new session seeded with a continue instruction and parks the old session.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./test-driver": "./test/checkpoint-driver.js",
+    "./goal-park-driver": "./test/goal-park-driver.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh.md",
+    "LICENSE",
+    "test"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "checkpoint",
+    "context",
+    "token"
+  ],
+  "license": "MIT"
+}

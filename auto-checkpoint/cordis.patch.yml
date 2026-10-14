@@ -1,0 +1,9 @@
+- insert:
+    - id: auto-checkpoint
+      name: dsh-auto-checkpoint
+      config:
+        triggerTokens: 300000
+        # {{session}} 会替换成会话短 id：接力链上每一棒写自己的文件，
+        # 不会覆盖上一棒的检查点（checkpoint-9b1a8732.md、checkpoint-4c201fa3.md…）。
+        checkpointPath: 'checkpoint-{{session}}.md'
+        autoNewSession: true

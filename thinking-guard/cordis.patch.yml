@@ -1,0 +1,19 @@
+- insert:
+    - id: thinking-guard
+      name: dsh-thinking-guard
+      # 需要 agents 服务就绪（钩子里要读 agent.session）
+      inject: [ agents ]
+      config:
+        enabled: true
+        # 下面是判据阈值，不写就用代码默认值（默认值 = 我们在本机跑的那套）
+        # minChars: 400
+        # minRepeats: 25
+        # minShare: 0.20
+        # maxUnit: 30
+        # tailChars: 4000
+        # v2 判据（短句轮换 / 英文碎片），默认开；关掉它 = 退回只用第一把尺子
+        # rotationGuard: true
+        # shortShareMin: 0.35
+        # topUnitShareMin: 0.50
+        # 先观察不落地（强烈建议第一次这样跑一天）：
+        # dryRun: true
