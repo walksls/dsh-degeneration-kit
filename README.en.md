@@ -35,6 +35,14 @@ Three reasons, and missing any one leaves a hole:
 
 ⇒ In one line: **folding = produce less, compaction = clear the stock. You need both for a closed loop.**
 
+> 💡 **There is one linkage between the two plugins** (added 2026-10-15): right after the **runaway valve**
+> inside `thinking-guard` aborts a loop, `dsh-auto-checkpoint` **compacts once anyway** — ignoring the watermark
+> threshold and the per-session handling you picked in the panel. The valve clears "what is being spewed right
+> now"; compaction clears "what accumulated" — the two join up.
+> ⚠️ This step **only exists if you run the valve** (with `dsh-auto-checkpoint` alone there is none). To turn it
+> off you must globally set `AUTO_COMPACT_ON_VALVE_ABORT` to `false` (default `true`) and restart — see
+> [auto-checkpoint/README.en.md](auto-checkpoint/README.en.md).
+
 ## Measured: one session burned 2.3 billion tokens and stayed alive
 
 ![Token usage of a single session](docs/session-2.3b-tokens.png)

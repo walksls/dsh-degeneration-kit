@@ -27,6 +27,12 @@
 
 ⇒ 一句话：**折叠 = 少产生，压缩 = 清库存。两个都在，才是闭环。**
 
+> 💡 **两个插件之间有一处联动**（2026-10-15 补）：`thinking-guard` 里的**急停阀**当场掐断复读之后，
+> `dsh-auto-checkpoint` 会**顺带压一次** —— 不看水位阈值，也不看那会话在面板上选的处理方式。
+> 阀清的是"正在喷的那一段"，压缩清的是"历史累积"，接得上。
+> ⚠️ 这一步**要有阀才有**（只装 `dsh-auto-checkpoint` 的话没有）；想关掉只能全局改常量
+> `AUTO_COMPACT_ON_VALVE_ABORT`（默认 `true`）再重启，详见 [auto-checkpoint/README.md](auto-checkpoint/README.md)。
+
 ## 实测：一个会话跑满 23 亿 token 也没崩
 
 ![单会话 token 用量](docs/session-2.3b-tokens.png)

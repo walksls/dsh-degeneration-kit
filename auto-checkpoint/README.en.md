@@ -119,6 +119,21 @@ handoff path, so the two never race.
 > - **"post-compaction re-anchor"** (`reanchorAfterCompact`) = after a successful compaction, inject one
 >   "read the files before you act" line **into the same session**. It does **not** open a new session.
 
+> 🛑 **One exception: when the runaway valve fires, it bypasses the gate above** (added 2026-10-15).
+> If you run the escape valve (`escape-valve`), then right after it aborts a session's turn, this plugin
+> **compacts once anyway** — **ignoring** the *auto-compact at threshold* setting **and** the pressure
+> threshold (cooldowns still apply). The signature it looks for is `turn/end` carrying
+> `{kind:'aborted', reason:{kind:'hook', …}}`; pressing "stop generating" yourself is `kind:'user'` and
+> does **not** trigger it.
+> · Why: the valve clears "what is being spewed right now", compaction clears "what accumulated" — two
+>   halves of one job, not duplicates.
+> · To turn it off you must **globally** set the constant `AUTO_COMPACT_ON_VALVE_ABORT` to `false` and
+>   restart the web app (`index.js:432`, default `true`). ⚠️ That one constant is **shared** with
+>   "auto-compact at threshold" — switching it off disables both.
+> · Known limit: compaction needs the agent to be idle. In an ordinary web session the agent really is idle
+>   after a valve abort, so it fits; in **long-running / goal-driven sessions** the driver restarts itself and
+>   compaction may miss the window (it gives up after 3 retries).
+
 **3. Recommended values** (⚠️ only meaningful for sessions that **take the handoff path**: a session ticked
 *auto-compact at threshold* never uses `triggerTokens` / `remindTokens` — it stays alive on compaction):
 
@@ -199,8 +214,12 @@ Both panels edit the **same config**.
   progress bar.
 - **Toggles**: `写完后自动开新会话` (auto new session), `启用自动检查点`
   (enabled).
-- **Per-session handling** (applies to the session you are currently viewing): *do nothing (default)* /
-  *remind me at threshold* / *auto-compact at threshold* — the last one never yields to handoff, see §2 above.
+- **Per-session handling** (⚠️ stored **per session**, not a global switch): *do nothing (default)* /
+  *remind me at threshold* / *auto-compact at threshold*. Whatever you pick applies to **the session you have
+  open right now** — it is written into `sessionModes` in `~/.dsh/auto-checkpoint.json` (keyed by session id)
+  and then **sticks to that session**: switching away, closing the tab, or restarting the web app all keep it,
+  and other sessions are unaffected. ⚠️ Do not read this as "you must stay in that session for it to work".
+  (`auto-compact at threshold` makes that session skip the handoff path, see §2 above.)
 - Disabling keeps the config; reopening restores it.
 
 The runtime config file overrides the static defaults in `cordis.patch.yml`;
