@@ -83,6 +83,9 @@ open-source one; it is listed here for reference only:
 - It is deliberately strict about what gets remembered. In its own words: a topic keeps only four things —
   the question it started from, the conclusion reached, what it affects, and what it depends on;
   **the process (discussion, dead ends, detours) is deliberately not kept**.
+- ⚠️ Its semantic retrieval needs a **local** embedding service (ollama only, defaults to
+  `127.0.0.1:11434`); remote embedding providers are explicitly barred from its fast lane. Without
+  ollama it silently falls back to lexical retrieval — a **deliberate degradation, not a fault**.
 
 ⚠️ Do not treat it as a "preserve the persona" solution — persona comes from your mode/preset config
 (e.g. a persona line in a preset), while a memory plugin covers *conclusion-level* cross-session memory.
