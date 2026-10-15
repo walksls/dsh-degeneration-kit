@@ -60,6 +60,34 @@ than any alternative.
 
 → [`INSTALL.en.md`](INSTALL.en.md) (two commands + how to verify + troubleshooting)
 
+## What this does *not* solve (and what to pair it with)
+
+This kit treats "**do not derail**": when the model falls into a loop, or pollution piles up in the context,
+it cuts the loop off on the spot and clears the stock. It does **not** treat "**do not forget**".
+Three separate things:
+
+| What you fear losing | Does compaction lose it? | Who owns it |
+|---|---|---|
+| **Persona** (voice, who it is) | **No.** Persona lives in the system prompt, and compaction explicitly excludes it (the `dsh-compaction-basic` docs: the system prompt at surface node 0 is never shadowed) | your preset / mode config |
+| **Task state** (where you are, next step, files touched) | **No.** A checkpoint is written before compaction; the next session reads it and carries on | this kit (`dsh-auto-checkpoint`) |
+| **Conclusions reached in conversation** ("we agreed on A, not B", pitfalls hit, your preferences) | ⚠️ **Yes.** After compaction the model only sees a summary; those agreements are not in it | ⚠️ **this kit does not cover it** |
+
+The third row is the real gap. This kit guarantees "the session survives and the task continues"; it does
+**not** guarantee "it remembers what we settled earlier".
+
+Closing that gap needs a separate **cross-session long-term memory** plugin. We happen to run a third-party
+open-source one; it is listed here for reference only:
+
+- **`@aiwayds/dsh-topics-memory`**: <https://github.com/fan56/dsh-topics-memory> (MIT)
+- **Not written by us, and not maintained by us.** Its scope complements this kit; see its own README to install.
+- It is deliberately strict about what gets remembered. In its own words: a topic keeps only four things —
+  the question it started from, the conclusion reached, what it affects, and what it depends on;
+  **the process (discussion, dead ends, detours) is deliberately not kept**.
+
+⚠️ Do not treat it as a "preserve the persona" solution — persona comes from your mode/preset config
+(e.g. a persona line in a preset), while a memory plugin covers *conclusion-level* cross-session memory.
+Two different jobs.
+
 ## The two plugins
 
 | Plugin | Size | README |
