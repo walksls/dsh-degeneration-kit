@@ -16,6 +16,38 @@
 > **Drop either half and something slips through** (three reasons below). One alone still beats nothing, but for
 > real coverage, install both.
 
+## What a loop looks like: two shapes, and they need different detectors
+
+A "loop" is not one thing. We ran every `reasoning` block in **493 local session logs** through the same
+measure (`ra` = highest repeat count of a single sentence inside one block), and they fall into two families:
+
+| | **Type A · one sentence, hammered** | **Type B · short phrases rotating** |
+|---|---|---|
+| Repeat count | **10³–10⁴** | 20–200 |
+| Context | short (29k–42k) | long, **rises monotonically with length** |
+| Typical shape | `（读`×3369, `做`×1024, 「好」×**10848** | `Let me write it.` → `Go.` → `Now.` → `OK.` |
+| Reads as | **normal thinking**: a subject, a next action, every sentence well-formed, zero information | **normal progress** — the hardest of the two to notice |
+| How common | rare (5 Chinese blocks machine-wide) | common |
+| Tied to a preset | only ever seen under the "force Chinese thinking" preset (31 other sessions: **0**) | no |
+
+⚠️ **Two things that are easy to get backwards**:
+
+- **"Chinese degrades more easily" is a feeling, not what our data says.** What holds is "**the worst cases are
+  all Chinese**" (one to two orders of magnitude worse); by count, **the most common shape is the English
+  fragment**. Memory keeps the most alarming case, not the most frequent one.
+- **All 5 Chinese cases appeared under one single preset**, so we **cannot separate** "it is Chinese" from
+  "it is that set of formatting constraints" — do not read correlation as cause.
+
+**Why type B is especially hard to catch**: the original detector required **one** unit to take ≥20% of the
+sentences in the tail window, while rotation leaves every short phrase at ~15%. Nothing clears the gate ⇒ the
+whole block passes. Measured: **all 8 English-dominant blocks were stopped by that gate**.
+That is why the second detector, `rotationGuard`, exists (details in
+[thinking-guard/README.en.md](thinking-guard/README.en.md)).
+
+**Why a loop feeds itself**: DSH sends the `reasoning` blocks in the history **back upstream verbatim**.
+So a loop is not one bad step — it stays in the context and is re-sent on every step, and the model reads
+"this is what I have been repeating". That is what `thinking-guard` folds away.
+
 ## Why two, and why both
 
 | Plugin | What it does | When |
