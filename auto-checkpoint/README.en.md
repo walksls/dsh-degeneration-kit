@@ -141,18 +141,29 @@ handoff path, so the two never race.
 |---|---|---|---|
 | **256K (DSH default)** | 150k | 180k | 180k |
 | **512K** | **250k** | **350k** | **350k** |
-| **1M (we raised ours)** | **250k** | **350k** | **350k** |
+| **1M (we raised ours)** | **250k** | **350k–500k** | **350k** |
 
-- **512K and 1M use the same numbers** ⇒ **350k is an absolute comfort ceiling, not a ratio**: a bigger window is not
-  a reason to raise it (more expensive, slower, higher degeneration risk). Past ~350k, hand off.
+- **512K and 1M use the same numbers** ⇒ **the handoff point is not a percentage of the window**: do not scale it up
+  just because the window is bigger.
 - Only windows **below 512K** need to scale down: on 256K use 180k (≈ 69% of the window) with a 150k boundary.
-- The 512K/1M rows are the values **we actually run**; the 256K row is a **proportional estimate, not measured on a
-  small window**.
+- The 512K row is what **we actually run**; the 256K row is a **proportional estimate, not measured on a small window**;
+  **`350k–500k` is an experience-based figure** (our own feel from daily use), **not a measured cut-off**.
 - 🛑 Copying our numbers onto a 256K window breaks in two ways: `triggerTokens=350k` **never fires** (the plugin looks
   dead), and `taskBoundaryTokens=250k` sits at ~95% of the window, so the checkpoint lands when you are nearly out of room.
 
-**4. Why we hand off at 350k even with a 1M window**: past that point a larger window buys little — requests get slower
-and more expensive, and longer context raises the risk of degeneration (loops). Handing off around 350k is simply more stable.
+**4. Why we hand off around 350k even with a 1M window — and why you may go up to 500k**
+
+It is a **trade-off**; pick by what you fear more:
+
+- **Afraid of degeneration (loops)** → stay near 350k. Past that point a bigger window buys little: requests get slower
+  and more expensive, and a longer context raises the risk of degeneration (loops). Handing off around 350k is simply
+  more stable.
+- **Afraid of compacting too often** → you can go to 500k. Every compaction is one **full-context request**, and it also
+  **breaks the prompt cache** — on long, high-frequency work, compacting too eagerly can cost more than carrying a
+  little extra context.
+- ⚠️ **`350k–500k` is an experience-based figure, not a boundary we measured**: we have no controlled data on
+  "compaction frequency vs tokens spent", and we have never run 500k long-term (we run 350k). If your own feel
+  disagrees with it, trust yours.
 
 ### Old sessions (600K+) may refuse to compact — don't fight it
 

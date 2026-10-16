@@ -123,6 +123,27 @@ open-source one; it is listed here for reference only:
 (e.g. a persona line in a preset), while a memory plugin covers *conclusion-level* cross-session memory.
 Two different jobs.
 
+### The other commonly confused pain point: paying for tokens (not context length)
+
+That is a **different problem**: long context is expensive because it is re-sent every turn, while
+"do I have to pay for tokens at all" is a **unit-price** question.
+
+We ourselves run **`dsh-our-free-model`** (<https://github.com/Ebony-Vinyl/dsh-our-free-model>, MIT) —
+install it and use a set of frontier models with no API key.
+
+🛑 **Four disclaimers — read all of them before deciding**:
+
+- **Not written by us, and not maintained by us.** It is listed only because we use it every day. It is a
+  mature public project (~19k stars); file issues in its own repo, not here.
+- **It fixes unit price and does nothing about context length**: a memory plugin's injections still fill the
+  window and still slow every turn. To cut context, tune that plugin's own injection settings
+  (`topK`, injection budget, the `pointer` form instead of `digest`).
+- **Your requests go to its own upstream** (currently OpenCode's Zen gateway, `https://opencode.ai/zen/v1/*`,
+  with no third-party relay) — **not local inference**. If the code or conversation you feed it is sensitive,
+  think it through first.
+- **How long the free quota lasts is decided by neither us nor you**: the upstream can change the rules,
+  rate-limit, or drop models at any time. Do not build anything you depend on around it.
+
 ## The two plugins
 
 | Plugin | Size | README |
@@ -136,8 +157,19 @@ Two different jobs.
 |---|---|---|
 | 256K (DSH default) | 150k | 180k |
 | ≥512K | 250k | 350k |
+| ≥1M | 350k | 350k–500k |
 
-`350k` is a **comfort ceiling, not a ratio** — a bigger window is not a reason to raise it.
+`350k` is what we run ourselves, and it is **not a ratio** — 512K and 1M use the same numbers, so a bigger
+window is not a reason to multiply them.
+
+⚠️ **This is a trade-off — pick by what you fear more**:
+
+- **Afraid of degeneration (loops)** → stay near 350k. The longer the context, the slower and more expensive
+  each turn gets, and the higher the risk that the model falls into a loop.
+- **Afraid of compacting too often** → you can go to 500k. Every compaction is one full-context request, and it
+  also breaks the prompt cache — on long, high-frequency work that can end up costing more.
+  **`350k–500k` is an experience-based figure** (our own feel from daily use), **not a measured cut-off**:
+  we have never run 500k long-term, and we have no controlled data on "compaction frequency vs tokens spent".
 
 ## Changing the thresholds (no restart)
 
