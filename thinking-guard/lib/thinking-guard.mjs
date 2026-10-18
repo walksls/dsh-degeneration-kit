@@ -129,9 +129,25 @@ function isSubagent(agent) {
   } catch { return false }
 }
 
-/** 内置折叠说明（纯思考步；可用 config.note 覆盖）。 */
-export const DEFAULT_NOTE = '⟪thinking-guard⟫ 上一步的思考退化成了复读，已从模型可见历史中折叠。'
-  + '不要再重复上面的内容：直接用一两句话给出结论，或继续执行当前任务。'
+/** 内置折叠说明（纯思考步；可用 config.note 覆盖）。
+ *
+ * ⚠️ 这段文字会以 `role: "user"` 的身份送到模型面前 —— 这不是随手选的，
+ * 而是**唯一能真正送达的通道**：
+ *   · `developer/message` 转上游本来是 `role: "system"`（语义更对），
+ *     但宿主会在 `dsh-llm/lib/index.js` 的 `projectToolUpdates()` 里把它**静默丢弃**
+ *     （`if (!updateIds.has(message.id)) continue` —— 不在工具更新名单里的 developer 一律过滤）。
+ *     实测：会话日志 4 次折叠全部正确落盘、`deriveMessages()` 也返回 developer，
+ *     但真实 HTTP 请求体里一条都没有（代理抓包 + 三处探针交叉验证）。
+ *   · 0.2.0 / 0.2.1 都有这段过滤逻辑，所以 `developer/message` 两个版本都送不到。
+ *
+ * 既然只能用 user 通道，文案就必须自己承担消歧责任，三条硬要求：
+ *   ① **首句自报身份**（`⟪thinking-guard⟫`）—— 让模型知道这不是人在说话；
+ *   ② **不含任何祈使句**（"请…""不要…""直接…"）—— 祈使句是"用户下了个命令"的强信号，
+ *      正是它让模型开始编造用户说过的话（用户实报过的现象）；
+ *   ③ 只说**发生了什么**，把"该怎么办"留给模型自己判断。
+ */
+export const DEFAULT_NOTE = '⟪thinking-guard⟫ 上一步的思考退化成了复读，已从模型可见历史中折叠'
+  + '（原文仍保存在本地会话日志里）。这是一条插件提示，不是用户发言。'
 
 /** 待剪消息里有没有工具调用。 */
 export function hasToolCall(content) {
@@ -201,7 +217,7 @@ export function buildFoldNote(info, cfg = {}) {
   // ⭐ 这一句就是 arXiv 2601.05693 那条"软干预"（结论诱导）在 DSH 里**唯一可验证**的落点：
   //    阀在流上掐掉复读，但 cancel 会把排队/引导消息一起作废（实测 `outcome: canceled`），
   //    真正能到模型眼前的只有"替换掉毒块的这段说明"。
-  lines.push('不要再重复上面的内容：直接用一两句话给出结论，或继续执行当前任务；需要这些结果的细节时重新读取即可。')
+  lines.push('（该步内容已折叠；原文仍在本地日志里。）')
   return lines.join('\n')
 }
 

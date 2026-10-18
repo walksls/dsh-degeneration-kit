@@ -189,6 +189,20 @@ disk together) — **no restart**. Only the keys in the package's `cordis.patch.
 ## Status
 
 - **AS-IS**, MIT.
-- Verified against DSH **0.2.0-rc.2**. Both plugins use internal DSH services and events, so **a major upgrade may
-  break them together**.
+- Verified against DSH **0.2.0-rc.2** and **0.2.1-rc.2** (both actually run). Both plugins use internal DSH
+  services and events, so **a major upgrade may break them together**.
 - Not battle-tested at scale; forks and PRs welcome.
+
+### Why the fold note is `role: "user"`
+
+The note left behind after a fold travels as `user/message`, not `developer/message`. That was a hard-won choice.
+
+`developer/message` maps to `role: "system"` upstream, which is semantically better. But the host silently drops
+**any developer message that is not a tool update** in `projectToolUpdates()` (`if (!updateIds.has(message.id)) continue`).
+We measured it: the session log held correct fold events and `deriveMessages()` returned `developer`, yet the real
+HTTP request body contained none of them — it took three probes and a capturing proxy to pin it to that one line.
+
+`user/message` is the only channel that actually reaches the model. The tradeoff is that the model may mistake it
+for something the user said, so the wording does two things: it identifies itself in the first clause
+(`⟪thinking-guard⟫`), and it contains **no imperatives at all** ("please…", "don't…", "just…" read as a user
+issuing an order — that is exactly what makes a model start inventing things the user said).
