@@ -189,8 +189,10 @@ disk together) — **no restart**. Only the keys in the package's `cordis.patch.
 ## Status
 
 - **AS-IS**, MIT.
-- Verified against DSH **0.2.0-rc.2** and **0.2.1-rc.2** (both actually run). Both plugins use internal DSH
-  services and events, so **a major upgrade may break them together**.
+- Verified against DSH **0.2.1-rc.2** (full real run). **0.2.0-rc.2 was only source-checked, never actually run** —
+  both versions ship the same `developer` filter in `dsh-llm`, which is why the fold note always travels as
+  `user/message` and does not depend on the version. Both plugins use internal DSH services and events, so
+  **a major upgrade may break them together**.
 - Not battle-tested at scale; forks and PRs welcome.
 
 ### Why the fold note is `role: "user"`
