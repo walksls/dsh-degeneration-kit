@@ -221,7 +221,7 @@ disk together) — **no restart**. Only the keys in the package's `cordis.patch.
 The note left behind after a fold travels as `user/message`, not `developer/message`. That was a hard-won choice.
 
 `developer/message` maps to `role: "system"` upstream, which is semantically better. But the host silently drops
-**any developer message that is not a tool update** in `projectToolUpdates()` (`if (!updateIds.has(message.id)) continue`).
+**any developer message that is not a tool update** before the request goes upstream — no error, no log line.
 We measured it: the session log held correct fold events and `deriveMessages()` returned `developer`, yet the real
 HTTP request body contained none of them — it took three probes and a capturing proxy to pin it to that one line.
 

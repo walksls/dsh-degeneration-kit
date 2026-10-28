@@ -26,7 +26,7 @@
  * assistant 消息）才发现**这个限制放弃了多数情形**：
  *   · 命中退化判据的块共 **24** 个，其中**带工具调用的 17 个（71%）**——v1 剪不到；
  *   · 背景数：**96.6%** 的 assistant 消息都带 tool-call。
- * 而 `dsh-session` 的校验规则（`lib/index.js:290-453` 四条，逐条读过）允许一条
+ * 而 `dsh-session` 的校验规则（四条，逐条读过源码）允许一条
  * **`user/message` 替换覆盖跨类型的多节点连续 span**：
  *   · `replacementRange()`：起止 seq 都必须在当前 surface 里，遮蔽集 = 这一段连续节点；
  *   · `assertSourceEventReferences()`：`sourceEventSeqs` 必须覆盖每个被遮蔽节点；

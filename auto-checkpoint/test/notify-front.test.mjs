@@ -1,7 +1,7 @@
 /**
  * 「报话插到 `next-turn` 队首」的回归测试（2026-10-11，**用户洞见**）。
  *
- * 背景：`sessionController.prompt` 只有两种投递（`dsh-api-session-controller/lib/index.js:882`）——
+ * 背景：`sessionController.prompt` 有两种投递语义 ——
  * `mode:'steer'`（插 `next-step`，**打断当前回合**）与其余（`followup` = **追加 `next-turn` 队尾**）。
  * 而 **goal 回合也是队尾追加**（`dsh-goal-round-driver`）⇒ 队尾的报话要等 goal 的
  * **下一轮**跑完才轮到它（用户体感：「只有 goal 完了才能报话，黄花菜都凉了」）。

@@ -188,7 +188,7 @@
 
 折叠后留下的那条说明走的是 `user/message`，不是 `developer/message`。这是踩过坑之后的选择。
 
-`developer/message` 转上游本来是 `role: "system"`，语义更对。但宿主在 `dsh-llm` 的 `projectToolUpdates()` 里会把**不在工具更新名单里的 developer 消息静默丢弃**（`if (!updateIds.has(message.id)) continue`）。实测：会话日志里折叠事件完全正确、`deriveMessages()` 也返回 `developer`，可真实 HTTP 请求体里一条都没有——查了三处探针、抓了代理包才定位到这一行。
+`developer/message` 转上游本来是 `role: "system"`，语义更对。但宿主在把消息送上游**之前**会把**不在工具更新名单里的 developer 消息静默丢弃** —— 不报错、不留日志。实测：会话日志里折叠事件完全正确、`deriveMessages()` 也返回 `developer`，可真实 HTTP 请求体里一条都没有——查了三处探针、抓了代理包才定位到这一行。
 
 `user/message` 是唯一能真正送达的通道。代价是模型可能把它误当成"用户说的话"，所以文案做了两件事：首句自报身份（`⟪thinking-guard⟫`），以及**一个祈使句都没有**（"请…""不要…""直接…"这类句子是"用户下了个命令"的强信号，正是它会让模型开始编造用户说过的话）。
 
