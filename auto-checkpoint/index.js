@@ -564,7 +564,7 @@ const AUTO_PRECOMPACT_REUSE_MS = 30 * 60 * 1000
  * confirms which revision is actually live (`patchReload: live` reloads
  * config, not host module code).
  */
-const BUILD = '2026-10-28+precompact-per-compact'
+const BUILD = '2026-10-29+precompact-content-gate'
 
 /**
  * 收尾前纠正「闷头干活不吐字」—— **2026-10-10 02:20 关闭**。
@@ -820,6 +820,11 @@ function stateFor(agentId) {
       // 这样旧会话（stateFor 早已建过、没有这两个字段）也能走同一条分支。
       preflightAtMs: 0,
       preflightAsks: 0,
+      // 🆕 2026-10-29：上一次**判定通过**时「🔑 这一轮定下的结论」那节的指纹。
+      // 用来识破「`cat >>` 追加一行刷 mtime、正文没动」—— mtime 层对此完全无感。
+      // ⚠️ 不持久化（与 preflightAtMs 同命）：重启后为 null ⇒ 会被要求重写一次。
+      //    这是**有意的安全退化**：宁可多催一轮，也不拿"追加一行"的档去压。
+      preflightSectionHash: null,
     }
     states.set(agentId, s)
   }
@@ -1376,10 +1381,70 @@ export function apply(ctx, config = {}) {
   }
 
   /**
-   * 落档文件「写好了吗」—— 判据与 `freshCheckpointSize` 同款（mtime ≥ 我们催的时刻，
-   * 容忍 2 秒粒度/时钟偏差），但用**独立的** `st.preflightAtMs`：
-   * 交接那条路用的是 `st.askedAtMs`，两个字段必须分开，否则一边催过就会让另一边
-   * 误判成"已经写好了"，而文件其实是上一次的。
+   * 轻量指纹：长度 + 前/中/后三段摘要。
+   *
+   * 为什么不用整段 `sha256`：每次压缩都要读一份几十 KB 的落档，算全文件 hash 没必要；
+   *   而我们要分辨的只是「一个字都没动」vs「动过」—— 长度 + 首中尾已经很够。
+   * ⚠️ 理论上"改了中间且长度不变"可能撞车，但那种改动本来就说明模型重写了这一节，
+   *   首中尾三段同时不变的几率极低；且**判错的方向是"要求重写"**（安全侧），不是放过。
+   */
+  function sectionFingerprint(section) {
+    const s = String(section ?? '')
+    const n = s.length
+    if (n === 0) return 'empty'
+    const mid = Math.floor(n / 2)
+    const pick = (a, b) => s.slice(a, Math.min(b, n))
+    return `${n}|${pick(0, 120)}|${pick(Math.max(0, mid - 60), mid + 60)}|${pick(Math.max(0, n - 120), n)}`
+  }
+
+  /**
+   * 从落档正文里抽出「🔑 这一轮定下的结论」那一节的正文（去掉标题行本身）。
+   *
+   * 🛑 2026-10-29 加（真机事故，会话 `02ce1b44`「夺刃总管」）：
+   *   光看 mtime 会被 **`cat >>` 追加一行**骗过去 —— 文件"刚被碰过"，正文一个字没改。
+   *   实测：落档 mtime `10-29 01:04:36`（那次只是往末尾追加了一段「发图铁律」），
+   *   而正文实际停在 `10-28 18:19`；`01:25:40` 的压缩因此**没被催办**、直接放行。
+   *   对 `P0/P0b/P4- 废墟/俄罗斯方块/切法` 这些这一轮的产物 grep 落档 ⇒ **0 命中**。
+   *   ⇒ 判据必须落到**内容**：这一节是否真的写进了"新一轮"的东西。
+   *
+   * 为什么盯这一节：它是催办模板里**第 0 条**（比 1-9 全都重要），
+   *   要求写"会改变下一步行为的那句话 + 出处"。
+   *   ⚠️ 文件里可能有**多个**同名节（历史遗留 + 新补的）⇒ 取**最后一个**（最新写的那份）。
+   */
+  function extractThisRoundSection(text) {
+    if (typeof text !== 'string' || text.length === 0) return null
+    const lines = text.split('\n')
+    // 标题匹配要宽松：`## 🔑 这一轮定下的结论（…）`、`### 同样`、有无 emoji 都认。
+    const headRe = /^#{2,4}\s*(?:🔑\s*)?这一轮定下的结论/
+    const starts = []
+    for (let i = 0; i < lines.length; i += 1) if (headRe.test(lines[i])) starts.push(i)
+    if (starts.length === 0) return null
+    const start = starts[starts.length - 1] + 1
+    // 到下一个同级或更高级标题为止
+    let end = lines.length
+    for (let i = start; i < lines.length; i += 1) {
+      if (/^#{1,4}\s/.test(lines[i])) { end = i; break }
+    }
+    const body = lines.slice(start, end).join('\n').trim()
+    return body.length > 0 ? body : null
+  }
+
+  /**
+   * 落档文件「写好了吗」—— 两层判据，缺一不可：
+   *
+   *  ① **时间层**（2026-10-12 加、2026-10-28 收紧）：mtime 必须 ≥ 下界
+   *     （`askedAt ?? lastCompactionEndMs`）。挡的是"上一轮留下的旧档"。
+   *  ② 🆕 **内容层**（2026-10-29 加）：`## 🔑 这一轮定下的结论` 这一节的正文，
+   *     必须与**上一次判定通过时**（`st.preflightSectionHash`）**不一样**。
+   *     挡的是"`cat >>` 追加一行刷 mtime、正文没动" —— 时间层对此完全无感（实测事故）。
+   *
+   * 为什么"哈希变了"就够（而不是要求它一定变长）：模型重写整篇、或改了措辞都算数；
+   *   真正要排除的只是"一个字没动"。用长度+首尾摘要做轻量指纹，避免每次压缩都算全文件 hash。
+   *
+   * ⚠️ 两个前提都缺失时的退化（安全优先）：
+   *   · 文件里**没有**这一节（老格式的档）⇒ 只按时间层判（不为了新格式把老会话卡死）；
+   *   · 没有历史指纹（重启后内存丢了）⇒ 视为"没通过"，要求重写一次。
+   *     代价是多催一轮；收益是绝不会拿"追加一行"的档去压。
    */
   async function freshPreflightSize(agent, st) {
     try {
@@ -1392,14 +1457,35 @@ export function apply(ctx, config = {}) {
       const mtimeMs = typeof s.mtimeMs === 'number' ? s.mtimeMs : s.mtime.getTime()
       // 🛑 2026-10-12 修「旧落档冒充新落档」：`askedAt` 缺席时**不再降级成 `size > 0`**
       //（理由见 `lastCompactionEndMs` 的注释：该字段不持久化 + 压缩成功会把它归零）。
-      // 下界 = 「我们这次催过」(askedAt) ?? 「最近一次压缩结束」(compactedAt)：
+      // 下界 = 「我们这次催过」(askedAt) ?? 「最近一次压缩结束」(compactedAt）：
       //   · 压缩之后重写的落档 ⇒ mtime ≥ 下界 ⇒ 算数，不催；
       //   · 上一轮留下的旧档   ⇒ mtime <  下界 ⇒ 不算数，**重新催** —— 这正是设计意图，
       //     见 `2172-2174`：「压完了 ⇒ 落档状态归零，下一次压缩前重新要一份」。
       // 两个下界都取不到（全新会话、从没压过）⇒ 保持旧行为 `size > 0`，不误伤。
       const floor = askedAt ?? lastCompactionEndMs(agent?.session)
-      if (floor === null) return s.size
-      if (mtimeMs + MTIME_SLACK_MS < floor) return 0
+      if (floor !== null && mtimeMs + MTIME_SLACK_MS < floor) return 0
+      // ── ② 内容层（2026-10-29）──
+      let text
+      try {
+        text = await readFile(abs, 'utf8')
+      } catch {
+        text = ''
+      }
+      const section = extractThisRoundSection(text)
+      // 老格式没有这一节 ⇒ 只按时间层判（不为新格式把存量会话卡死）
+      if (section === null) return s.size
+      const fingerprint = sectionFingerprint(section)
+      const prev = st && typeof st.preflightSectionHash === 'string' ? st.preflightSectionHash : null
+      if (prev === fingerprint) {
+        // 内容与上次判定时**完全一样** ⇒ 说明这一轮压根没往里写东西（`cat >>` 那种）
+        ctx.logger.info(
+          `[auto-checkpoint] pre-compact note section UNCHANGED for ${agent?.id ?? '?'} ` +
+            `(mtime looks fresh but 「这一轮定下的结论」 is identical) — asking again`,
+        )
+        return 0
+      }
+      // 通过：记住这一次的指纹，下次再比
+      if (st) st.preflightSectionHash = fingerprint
       return s.size
     } catch {
       return 0
@@ -1887,7 +1973,7 @@ export function apply(ctx, config = {}) {
 
     // 🛑🛑 2026-10-22 最终版（用户报「总管经理间的派话也还在排队」，同一现象第三次）
     //
-    // 史：原来这里先读 问「它现在忙不忙」再分两路；不忙 ⇒ 队首投递（队首）。
+    // 史：原来这里先先问「忙不忙」再分两路；不忙 ⇒ 队首投递（队首）。
     //     实测证伪：总管 23:25 起连续 step/start（一直在跑），23:39:42 派话**仍然**进了 next-turn
     //     ⇒ 那个 busy 判断当时是 false。而且就算判断对了，队首投递 也只是"排下一轮队首"，
     //     长会话（一个回合跑几十分钟）里照样等于收不到。
@@ -2214,6 +2300,10 @@ export function apply(ctx, config = {}) {
       `🛑🛑 **第 0 条，比下面 1-9 全都重要** —— 先写这一节，紧跟在标题后面：\n` +
       `\`## 🔑 这一轮定下的结论（压缩后必须原样继承）\`\n` +
       `\n` +
+      `🛑🛑🛑 **插件查的是这一节的「内容」，不是文件的修改时间** —— 你必须把**新的**结论真正写进这一节。\n` +
+      `**只在文件其他地方（或末尾）追加一行，不会通过检查，会被再催一次。**\n` +
+      `（2026-10-29 真实事故：会话往末尾追加了一段「发图铁律」，正文没动 ⇒ 插件当时只看 mtime\n` +
+      `  就放行了 ⇒ 那一轮 5 小时的产物一个字都没进档。现在这一节没变就会被挡住。）\n` +
       `**3-7 条，一条一句**，每条写成「**以后照着做的那句话**」+ 出处（\`文件:行号\`；\n` +
       `查不到就写"会话内推得"，**别编行号**）。\n` +
       `\n` +
@@ -2514,6 +2604,13 @@ export function apply(ctx, config = {}) {
           // 第一次有效、之后次次失效，是最难发现的那种坏法。
           st.preflightAsks = 0
           st.preflightAtMs = 0
+          // 🆕 2026-10-29：`preflightSectionHash` **刻意不清零** —— 它是"上一次压缩时那一节长什么样"，
+          // 下一周期正是拿它做对比基准：
+          //   · 模型真写了新结论 ⇒ 指纹不同 ⇒ 放行；
+          //   · 只 `cat >>` 追加一行（那一节没动）⇒ 指纹相同 ⇒ **重新催** ← 今天事故的正解。
+          // 清零的后果正是 10-29 实测到的：每周期都"没有基准" ⇒ 追加一行必然放行。
+          // ⚠️ 它的代价：重启后（内存丢）第一个周期没有基准 ⇒ 会先放行一次 —— 可接受，
+          //    因为下一次压缩就又有基准了。
           // 把"上下文从多少变多少"也记下来 —— 这是用户唯一能直观看到压缩效果的数字。
           let after = NaN
           try {
@@ -3862,7 +3959,7 @@ export function apply(ctx, config = {}) {
           // 🛑🛑 2026-10-22 定案：**不传 mode 时也一律 steer**，不再猜忙闲、不再降级。
           //
           // 史（用户同一个现象报了三次：「插话永远变成排队」「修了一个另一个没修啊」）：
-          //   ① 这里曾按 问「它现在忙闲」再分两路；忙 ⇒ steer，闲 ⇒ 队首投递（排下一轮队首）。
+          //   ① 这里曾按「忙不忙」分两路；忙 ⇒ steer，闲 ⇒ 队首投递（排下一轮队首）。
           //   ② 实测证伪：总管 23:25 起连续 `step/start` 一直在跑，23:39 派话**仍被判"不忙"**进了 next-turn
           //      （`agents.get()` 大概返回 null ⇒ status undefined ⇒ busy=false）。
           //   ③ 更根本的是：**队首投递 只是"排下一轮队首"**。目标一个回合跑几十分钟时，

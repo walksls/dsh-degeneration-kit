@@ -150,7 +150,7 @@ install it and use a set of frontier models with no API key.
 |---|---|---|
 | `thinking-guard/` | ~760 lines (`lib/`, three files, stop-valve included), **zero host-service dependencies** | [English](thinking-guard/README.en.md)｜[中文](thinking-guard/README.md) |
 | `auto-checkpoint/` | 4,292 lines, 8 host services | [English](auto-checkpoint/README.en.md)｜[中文](auto-checkpoint/README.md) |
-| `auto-checkpoint/` | 4,524 lines, 8 host services | [English](auto-checkpoint/README.en.md)｜[中文](auto-checkpoint/README.md) |
+| `auto-checkpoint/` | 4,621 lines, 8 host services | [English](auto-checkpoint/README.en.md)｜[中文](auto-checkpoint/README.md) |
 
 ## When compaction goes wrong, it recovers on its own
 
@@ -164,10 +164,16 @@ and each one needs a different response.
 | Network blip vs. a genuine failure | Treated the same | Separated: transient errors retry, real failures count |
 | Sending a message to another session | Guessed whether the target was busy, then picked a delivery mode — that guess is wrong in practice | **No guessing**: always deliver as "next step" — inserted mid-turn when busy, opening a fresh turn when idle |
 | A note file whose mtime looks recent | Only compared against the previous compaction, so a note written early in the cycle counted as fresh after hours of further work | Anchored to **the start of the current compaction cycle**: too old means it asks again, and only compacts anyway once the ask limit is hit (**never deadlocks**) |
+| A note that was "just touched" but gained no new content | mtime only — appending a single line with `cat >>` was enough to pass | **Two layers**: in addition to the time check, the body of the "conclusions from this round" section must differ from the last approved version |
 
-The last row was a real incident: the note was written at 22:18, compaction at 03:58 judged it
-fresh and compacted immediately — **5 hours 40 minutes** of conversation never made it into any
-note and was reduced to a summary.
+The last two rows were real incidents:
+
+- The note was written at 22:18; compaction at 03:58 judged it fresh and compacted immediately —
+  **5 hours 40 minutes** of conversation never made it into any note.
+- After the time check was added, `cat >>` got around it: the note's mtime was 01:04 (that write only
+  appended a paragraph at the end) while its body had stopped at 18:19 — the 01:25 compaction was
+  never asked to rewrite it, and the identifiers that round produced got **zero hits** in the note.
+  ⇒ Watching whether the file was touched is never enough; watch whether *this round's* content is in it.
 
 > When re-delivering a user's own words, pass `raw: true` so the text goes through unmodified
 > with no prefix — otherwise the recipient treats it as a task report.
