@@ -139,6 +139,12 @@ function isSubagent(agent) {
  *     实测：会话日志 4 次折叠全部正确落盘、`deriveMessages()` 也返回 developer，
  *     但真实 HTTP 请求体里一条都没有（代理抓包 + 三处探针交叉验证）。
  *   · 0.2.0 / 0.2.1 都有这段过滤逻辑，所以 `developer/message` 两个版本都送不到。
+ *   · `developer/message` 转上游本来应该是 `role: "system"`（语义更对），
+ *     但宿主在把消息送上游**之前**会把它**静默丢弃**：该角色只被允许承载工具增删，
+ *     其余一律过滤 —— 不报错、不留日志。
+ *     实测：会话日志里每次折叠都正确落盘、派生消息列表里也是 developer，
+ *     但真实 HTTP 请求体里一条都没有（代理抓包 + 三处探针交叉验证）。
+ *   · 0.2.0 / 0.2.1 都有这段过滤，所以 `developer/message` 两个版本都送不到。
  *
  * 既然只能用 user 通道，文案就必须自己承担消歧责任，三条硬要求：
  *   ① **首句自报身份**（`⟪thinking-guard⟫`）—— 让模型知道这不是人在说话；
@@ -255,7 +261,7 @@ function describeResult(session, seq, call) {
 }
 
 /** 扫一遍这个会话里还没检查过的 surface 节点。 */
-function sweep(ctx, session, cfg, state) {
+function sweep(ctx, session, cfg, state, turn, step) {
   let s = state.get(session)
   if (s === undefined) {
     // 被替换掉的节点会从 surface 里消失（`applySurfacePlan` 是 splice），
@@ -305,8 +311,19 @@ function sweep(ctx, session, cfg, state) {
         results: plan.span.slice(1).map((rs, i) => describeResult(session, rs, step.calls[i]))
       }, cfg)
     try {
-      // 用**核心**事件类型做等价替换（`user/message` + surfaceOp replace + sourceEventSeqs）。
-      // 只有核心类型才能持久化：自定义事件类型在进程内没法带 `ignorable` 标记，加载器会拒绝。
+      // ⭐ 2026-10-18 定案：**回到 `user/message`**。
+      //   曾经试过 `developer/message`（转上游是 system 角色，语义更对），
+      //   但宿主在送上游之前会把它**静默丢弃**：该角色只被允许承载工具增删，
+      //   不在更新名单里的一律过滤（不报错、不留日志）。
+      //   实测：会话日志里每次折叠都正确落盘、派生消息列表里也是 developer，
+      //   但真实 HTTP 请求体里一条都没有（代理抓包 + 三处探针交叉验证）。
+      //   ⇒ `developer/message` 只承载工具增删，别拿它送自定义内容。
+      //
+      //   `user/message` 虽然角色是 user，但**能真正送达模型**。
+      //   代价是模型可能把它当成"用户说的话"（折得越多、"用户"发言越多，
+      //   曾导致模型编造用户说过的话）。
+      //   缓解：文案里**显式自报身份**（`[thinking-guard 插件]` 前缀）+ **不含任何祈使句**，
+      //   让模型一眼看出这是系统提示而非用户指令。
       session.append('user/message', {
         id: `thinking-guard-${seq}`,
         role: 'user',
@@ -364,11 +381,11 @@ export function apply(ctx, config = {}) {
 
   // ⚠️ 必须走中间件形状：每条 return 路径都要 next()（漏调会让全机会话哑火）。
   // ⚠️ 不能挂 `session/event`：Session.append 拒绝在别的 append 正在发布时重入。
-  ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
+  ctx.on('agent/pre-step', async ({ agent, turn, step, signal }, next) => {
     try {
       const session = agent?.session
       if (session !== undefined && !signal?.aborted && (cfg.includeSubagents || !isSubagent(agent))) {
-        sweep(ctx, session, cfg, state)
+        sweep(ctx, session, cfg, state, turn, step)
       }
     } catch (error) {
       dbg(`sweep 失败：${String(error)}`)

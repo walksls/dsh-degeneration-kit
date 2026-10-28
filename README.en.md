@@ -150,6 +150,27 @@ install it and use a set of frontier models with no API key.
 |---|---|---|
 | `thinking-guard/` | ~760 lines (`lib/`, three files, stop-valve included), **zero host-service dependencies** | [English](thinking-guard/README.en.md)｜[中文](thinking-guard/README.md) |
 | `auto-checkpoint/` | 4,292 lines, 8 host services | [English](auto-checkpoint/README.en.md)｜[中文](auto-checkpoint/README.md) |
+| `auto-checkpoint/` | 4,524 lines, 8 host services | [English](auto-checkpoint/README.en.md)｜[中文](auto-checkpoint/README.md) |
+
+## When compaction goes wrong, it recovers on its own
+
+Auto-compaction does not just "compact and be done". It fails in several distinct ways,
+and each one needs a different response.
+
+| Situation | Before | Now |
+|---|---|---|
+| Transient upstream drop (`Connection error.`) | Failed in 1 second and **nothing happened afterwards** — the session sat above the threshold, uncompacted | **Retries within the same turn**, backing off between attempts, instead of waiting for the next turn |
+| Transient failure | Counted as a strike; two blips degraded a healthy session to "remind only" | **Not counted**, and no cooldown — it can retry right away |
+| Network blip vs. a genuine failure | Treated the same | Separated: transient errors retry, real failures count |
+| Sending a message to another session | Guessed whether the target was busy, then picked a delivery mode — that guess is wrong in practice | **No guessing**: always deliver as "next step" — inserted mid-turn when busy, opening a fresh turn when idle |
+| A note file whose mtime looks recent | Only compared against the previous compaction, so a note written early in the cycle counted as fresh after hours of further work | Anchored to **the start of the current compaction cycle**: too old means it asks again, and only compacts anyway once the ask limit is hit (**never deadlocks**) |
+
+The last row was a real incident: the note was written at 22:18, compaction at 03:58 judged it
+fresh and compacted immediately — **5 hours 40 minutes** of conversation never made it into any
+note and was reduced to a summary.
+
+> When re-delivering a user's own words, pass `raw: true` so the text goes through unmodified
+> with no prefix — otherwise the recipient treats it as a task report.
 
 ## Recommended thresholds (`dsh-auto-checkpoint`)
 

@@ -1,0 +1,14 @@
+# Dev patch: mount the checkpoint driver in place of the headless runner and
+# override the auto-checkpoint plugin with a tiny trigger (any real step
+# crosses it). Uses id-targeted overrides, not insert, to avoid duplicate ids.
+- id: headless-runner
+  disabled: true
+- id: auto-checkpoint
+  config:
+    triggerTokens: 1
+    checkpointPath: 'checkpoint-{{session}}.md'
+    autoNewSession: true
+    remindEverySteps: 1
+- insert:
+    - id: checkpoint-driver
+      name: dsh-auto-checkpoint/test-driver

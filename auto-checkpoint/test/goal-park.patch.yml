@@ -1,0 +1,26 @@
+# Dev patch: reproduce the goal-round runaway across a checkpoint handoff.
+#
+# Mounts the linked plugin package (the revision under test) with a tiny
+# trigger, disables the stock headless runner, and adds the goal/park driver
+# that reports whether the handed-off session kept working.
+#
+# Run:
+#   DSH_HOME=<mirror without auto-checkpoint.json> \
+#   node <dsh>/lib/bin.js --profile headless --patch test/goal-park.patch.yml "任务：..."
+#
+# The A/B run against the pre-fix snapshot uses the same list with
+# `name: <snapshot path>` instead of `dsh-auto-checkpoint`.
+- id: headless-runner
+  disabled: true
+- id: auto-checkpoint
+  disabled: true
+- insert:
+    - id: auto-checkpoint-under-test
+      name: dsh-auto-checkpoint
+      config:
+        triggerTokens: 1
+        checkpointPath: 'checkpoint-{{session}}.md'
+        autoNewSession: true
+        remindEverySteps: 1
+    - id: goal-park-driver
+      name: dsh-auto-checkpoint/goal-park-driver

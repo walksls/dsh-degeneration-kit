@@ -107,7 +107,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { appendFileSync, readFileSync } from 'node:fs'
+import { appendFileSync, readFileSync, realpathSync } from 'node:fs'
 import { stat, readFile, writeFile, rename, mkdir } from 'node:fs/promises'
 import { isAbsolute, join, dirname } from 'node:path'
 import { homedir } from 'node:os'
@@ -372,6 +372,31 @@ const AUTO_COMPACT_MAX_WAIT_MS = 5 * 60 * 1000
 const AUTO_COMPACT_BUSY_RE = /not idle|Compaction is unavailable|active compaction/i
 
 /**
+ * 🆕 2026-10-19：**瞬时网络错误**（用户报的真机事故）。
+ *
+ * 现场（会话 `02ce1b44`「QQ · 夺刃总管」，cwd `/root/aa`）：
+ *   `15:33:56 command/run compact` → `15:33:57 compaction/end {error: "Connection error."}`
+ *   → 界面红字「Compaction could not produce a useful summary」。**全程只有 1 秒。**
+ * 也就是说：**压缩请求根本没走到模型**，发出去那一刻连接就断了。
+ * 而当时的处置是**直接放弃**（`runAutoCompact` 返回 `failed` ⇒ 调用方 `return note('error')`），
+ * 于是水位 385,894（阈值 380,000）的会话**停在没压的状态**，要等下一个 `turn/end` 才可能重来。
+ * 旁证：同一会话 1 分钟前刚有一次 `llm/retry`（`provider: api3`，`EMPTY_RESPONSE/SERVER/TIMEOUT`
+ * 那一组）⇒ **是上游在抖，不是这条会话有问题**。
+ *
+ * ⇒ 判定：这类错误**不是压缩失败**，与 `AUTO_COMPACT_BUSY_RE` 同类但方向相反 ——
+ *   busy 要**等窗口**，瞬时要**退避后立刻重试**。两条规矩：
+ *   ① **不计入 `AUTO_COMPACT_MAX_FAILS`** —— 否则上游抖两下就把好好的会话降级成「只提醒」；
+ *   ② **本轮内自动重试**（默认 3 次，2s→5s→10s），不必等下一个 turn。
+ *
+ * ⚠️ 判据只认**明确的传输层字样**，绝不把普通报错也划进来（否则真 bug 会被重试掩盖）。
+ */
+const AUTO_COMPACT_TRANSIENT_RE =
+  /Connection error|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|socket hang up|fetch failed|network error|stream (?:idle )?timeout|timed out/i
+
+/** 瞬时失败的重试退避（毫秒）；数组长度 = 重试次数。 */
+const AUTO_COMPACT_TRANSIENT_BACKOFF_MS = [2000, 5000, 10000]
+
+/**
  * 🛑 阀开火时**顺带压缩**（2026-10-09，用户拍板）。
  *
  * ── 为什么 ──
@@ -516,12 +541,30 @@ const PRECOMPACT_PATH_TEMPLATE = 'precompact-{{session}}.md'
 const PRECOMPACT_MAX_ASKS = 2
 
 /**
+ * 🆕 2026-10-28：**自动压缩**路径的「落档复用窗口」。
+ *
+ * 语义（用户拍板方案 A）：落档 mtime 必须落在 `现在 - AUTO_PRECOMPACT_REUSE_MS` 之后，
+ * 才算"代表本周期"、可以免催直接压；否则**重新催一份**。
+ *
+ * 为什么要它（真机事故，会话 `02ce1b44`）：
+ *   旧下界是 `lastCompactionEndMs()` = **上一次压缩结束**。`10-28 03:58` 那次压缩时，
+ *   落档 mtime `10-27 22:18` 晚于上次压缩结束 `10-27 17:53` ⇒ 被判"新鲜"⇒ 跳过催办。
+ *   而那 **5 小时 40 分**的对话**没进任何落档**，却正是这次压缩要折叠的内容 ⇒ 细节全丢。
+ *
+ * 窗口取 **30 分钟**（与手动路径的 `MANUAL_PRECOMPACT_REUSE_MS` 同值）：
+ *   · 太短（如 5 分钟）⇒ 一次压缩失败重试、或 busy 等窗口 5 分钟，就会误判"档过期"⇒ 白催一轮；
+ *   · 太长（如 2 小时）⇒ 又退回"半天前的档也算数"的老毛病。
+ *   30 分钟 ≫ 压缩本身耗时（实测 25~60 秒）+ busy 重试窗口，又远小于典型压缩间隔（数小时）。
+ */
+const AUTO_PRECOMPACT_REUSE_MS = 30 * 60 * 1000
+
+/**
  * Behaviour revision, surfaced by `GET /dsh-auto-checkpoint/state`. A running
  * web keeps the module it booted with, so this field is how an operator
  * confirms which revision is actually live (`patchReload: live` reloads
  * config, not host module code).
  */
-const BUILD = '2026-10-14-image-watermark+precompact-v2+reanchor-note+abs-paths'
+const BUILD = '2026-10-28+precompact-per-compact'
 
 /**
  * 收尾前纠正「闷头干活不吐字」—— **2026-10-10 02:20 关闭**。
@@ -1166,7 +1209,15 @@ export function apply(ctx, config = {}) {
         ? num() +
           '🛑 **先读你压缩前一刻自己写的落档**：`' + noteAbs + '` ——\n' +
           '   那是**上一个你**专门留给现在这个你的（到哪一步 / 踩过的坑 / 读过哪些文档 /\n' +
-          '   下一步第一件事），**比摘要准得多**，先读它，再读别的。\n'
+          '   下一步第一件事），**比摘要准得多**，先读它，再读别的。\n' +
+          '   🛑🛑 **读的时候按这个顺序用，别倒过来**：\n' +
+          '   ① 先看 `## 🔑 这一轮定下的结论` 那一节 —— **先把那几条照着做**，\n' +
+          '      它们是上一轮想明白的机制 / 判据，漏一条就可能把方向推反（2026-10-25 真实事故：\n' +
+          '      落档里列了 10 份文档却只写了一句"读过/还在用"，压后漏掉其中那条\n' +
+          '      "`We need` = 第一人称锚丢失时的缺省主语"，把实验做反了一整个回合）。\n' +
+          '   ② **只有**那几条里点名了出处的，才去读对应的 `文件:行号` —— 按需读，别通读。\n' +
+          '   ③ 兜底才是读整份文档 / grep 全项目。\n' +
+          '   ⚠️ 「文档全」不等于「结论在手」：列 10 份共 84 KB，你不会读，读了也不一定读到那一条。\n'
         : '') +
       (exists
         ? num() + '读本会话的检查点文件：`' + path + '`\n'
@@ -1548,6 +1599,63 @@ export function apply(ctx, config = {}) {
   }
 
   /**
+   * 把「按 cwd 建会话」升级成「按**工作区**建会话」。
+   *
+   * 🛑 为什么需要（2026-10-15 用户实报，代码级根因）：
+   *   `sessionController.create({ cwd })` **不会**把会话挂进工作区 ——
+   *   看 `@deepseek-ai/dsh-api-session-controller` 的 `create()`：
+   *     · `workspaceId` 与 `cwd` **只能给一个**（都给 ⇒ `gateway/bad-request`）；
+   *     · 只有传了 `workspaceId` 时才会 `workspace.attachSession(sessionId)`。
+   *   ⇒ 只给 `cwd` 建出来的会话**没有工作区归属**，在 GUI 侧边栏全部落进**「未分组」**
+   *     （用户那边 379 条、一次只展开 5 条 ⇒ 找刚派出去的会话要点几十次）。
+   *
+   * 约束：传 `workspaceId` 时 cwd 取 `workspace.path` ⇒ 只有**同一个目录**才能安全替换
+   * （让派活方拿到的工作目录与它要求的一模一样，不偷偷改成工作区根）。
+   * ⚠️ 工作区里存的是 registry 归一化后的 realpath，而调用方给的可能是带尾斜杠 /
+   *   软链接的写法 ⇒ **只按字面比会静默退回"未分组"**（正是要修的那个毛病）。
+   *   ⇒ 先按几种拼法归一化，见 `workspacePathSpellings`。
+   *
+   * 🛡️ 任何一步失败都**回退到老的 `{ cwd }` 行为**：宁可进"未分组"，也不能让派活挂掉。
+   */
+  function workspaceRequestFor(targetCwd, extra) {
+    try {
+      if (typeof targetCwd !== 'string' || targetCwd === '') return { cwd: targetCwd, ...extra }
+      const registry = ctx.get('workspaceRegistry')
+      const all = registry?.list?.()
+      if (!Array.isArray(all)) return { cwd: targetCwd, ...extra }
+      const spellings = new Set(workspacePathSpellings(targetCwd))
+      const hit = all.find((w) => typeof w?.id === 'string' && spellings.has(w?.path))
+      if (hit === undefined) return { cwd: targetCwd, ...extra }
+      return { workspaceId: hit.id, ...extra }
+    } catch (error) {
+      ctx.logger.warn(
+        `[auto-checkpoint] workspace lookup failed for ${String(targetCwd)}: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      )
+      return { cwd: targetCwd, ...extra }
+    }
+  }
+
+  /**
+   * `targetCwd` 可能有的几种写法：原样、去掉尾斜杠，以及这两个各自的 realpath。
+   * 只对**绝对路径**做 realpath（相对路径的解析依赖进程 cwd，不去猜）；realpath 失败
+   * （路径不存在 / 无权限）就少一种拼法，**不抛**。
+   */
+  function workspacePathSpellings(targetCwd) {
+    const trimmed = targetCwd.length > 1 ? targetCwd.replace(/\/+$/, '') : targetCwd
+    const spellings = trimmed === targetCwd ? [targetCwd] : [targetCwd, trimmed]
+    if (!isAbsolute(targetCwd)) return spellings
+    for (const candidate of [targetCwd, trimmed]) {
+      try {
+        spellings.push(realpathSync(candidate))
+      } catch {
+        // 路径不存在 / 无权限：少一种拼法而已，老行为兜底
+      }
+    }
+    return spellings
+  }
+
+  /**
    * Pause the old session's active goal before handing it off. A
    * session-scoped goal keeps its round driver queueing one `<goal_round>` per
    * quiescence — that is, the moment the handed-off turn closes, which is
@@ -1687,17 +1795,32 @@ export function apply(ctx, config = {}) {
   const PARENTS_FILE = join(homedir(), '.dsh', 'spawn-parents.json')
   const loadParents = async () => { try { return JSON.parse(await readFile(PARENTS_FILE, 'utf8')) } catch { return {} } }
   const saveParents = async (m) => { try { await writeFile(PARENTS_FILE, JSON.stringify(m, null, 2) + '\n', 'utf8') } catch {} }
+  /**
+   * 🛑 会话 id 归一化（2026-10-15，**实测踩到的静默 bug**）。
+   *
+   * 病：spawn 的 `parentSessionId` 传成**裸 UUID**（`25d21730-…` 而不是
+   * `session-25d21730-…`）时，`linkParent` 原样存下，收尾回报走
+   * `controller.prompt({sessionId})` 找不到会话 ⇒ 抛错 ⇒ 被 `autoNotifyIfDone`
+   * 的 try/catch 吞掉（`ctx.logger.warn` 又**不进 web.log**，见 AGENTS.md §七）。
+   * 实测证据：`POST /dsh-auto-checkpoint/notify` 对裸 UUID 直接回
+   * `{"ok":false,"error":"session \"…\" not found"}`，而完整 id 秒级投递成功。
+   * ⇒ 子会话的回报**全丢且无痕**（2026-10-15 我自己派的两条就是这么丢的）。
+   *
+   * 修法：两处 id 都补前缀（同时兼容两种写法，不再指望调用方记对格式）。
+   */
+  const normSessionId = (id) =>
+    (typeof id === 'string' && id !== '' && !id.startsWith('session-') ? `session-${id}` : id)
   async function linkParent(childId, parentId) {
     if (!childId || !parentId) return
-    const m = await loadParents(); m[childId] = parentId; await saveParents(m)
+    const m = await loadParents(); m[normSessionId(childId)] = normSessionId(parentId); await saveParents(m)
   }
   /**
    * 🛑 2026-10-11（**用户洞见**）：把报话**插到 `next-turn` 队首**，而不是队尾。
    *
    * 为什么必须这么做：
-   *   - `sessionController.prompt` 只有两种投递（`dsh-api-session-controller/lib/index.js:882`）：
+   *   - `sessionController.prompt` 只有两种投递（会话控制层）：
    *     `mode:'steer'` → `agent.steer()` = 插 `next-step`（**打断当前回合的连贯性**）；
-   *     其余 → `agent.followup()` = **追加到 `next-turn` 队尾**（`dsh-agent-loop/lib/index.js:807`）。
+   *     其余 → `agent.followup()` = **追加到 `next-turn` 队尾**（智能体循环层）。
    *   - 而 **goal 回合也是队尾追加**（`dsh-goal-round-driver` 里 `agent.followup(message)`）
    *     ⇒ 排在队尾的报话要等 goal 的**下一轮**跑完才轮到它
    *     （用户体感原话：「只有 goal 完了才能报话，到时候黄花菜都凉了」）。
@@ -1745,51 +1868,48 @@ export function apply(ctx, config = {}) {
   /**
    * ⭐ 2026-10-11（用户第二轮反馈）：**尽量插进"正在跑的那一轮"**。
    *
-   * 为什么还需要它：`promptToFront` 只能排到"**还没开跑**的回合"前面 —— 而那一条实测不够用：
+   * 为什么还需要它：队首投递 只能排到"**还没开跑**的回合"前面 —— 而那一条实测不够用：
    * 目标会话的 goal 回合在 `969` 排队、`973` 就开跑了，报话 `996` 才投进来 ⇒ 只能等那一轮跑完，
    * 用户体感是「都完成一轮了，结果还是 goal 先触发，派话在后面」。
    * ⇒ **在跑的时候**用 `mode:'steer'`（`agent.steer()` = 插 `next-step`，**当前回合的下一步**就认领）。
    *
    * 三条保底（缺一不可）：
-   *   ① **空闲时不用 steer** —— 空闲走 `promptToFront`（插队首），语义更稳
+   *   ① **空闲时不用 steer** —— 空闲走 队首投递（插队首），语义更稳
    *      （steer 的 `next-step` 在空闲态是否触发新一轮取决于宿主，没必要赌）；
    *   ② **steer 失败必须降级** —— 宿主会返回 `session/steer-unavailable` 之类
-   *      （客户端代码里就有这个错误码）⇒ 退回 `promptToFront`，**绝不把报话弄丢**；
-   *   ③ 拿不到 agent ⇒ 直接 `promptToFront`（它自己还有一层降级）。
+   *      （客户端代码里就有这个错误码）⇒ 退回 队首投递，**绝不把报话弄丢**；
+   *   ③ 拿不到 agent ⇒ 直接 队首投递（它自己还有一层降级）。
    *
    * 返回实际用的模式（写进 HTTP 响应，便于排查）：`'steer'` 或 `'front'`。
    */
   async function promptFast(sessionId, text) {
     const controller = ctx.get('sessionController')
-    const agents = ctx.get('agents')
-    let agent = null
-    try {
-      agent = agents?.get?.(sessionId) ?? null
-    } catch {
-      agent = null
-    }
-    const busy = typeof agent?.status === 'string' && agent.status !== 'idle'
-    if (busy) {
-      try {
-        await controller.prompt(
-          {
-            sessionId,
-            requestId: `${RPC_PREFIX}${randomUUID()}`,
-            mode: 'steer',
-            content: [{ type: 'text', text }],
-          },
-          new AbortController().signal,
-        )
-        return 'steer'
-      } catch (error) {
-        ctx.logger.warn(
-          `[auto-checkpoint] steer failed for ${sessionId}, falling back to queue front: ` +
-            `${error instanceof Error ? error.message : String(error)}`,
-        )
-      }
-    }
-    await promptToFront(sessionId, text)
-    return 'front'
+
+    // 🛑🛑 2026-10-22 最终版（用户报「总管经理间的派话也还在排队」，同一现象第三次）
+    //
+    // 史：原来这里先读 问「它现在忙不忙」再分两路；不忙 ⇒ 队首投递（队首）。
+    //     实测证伪：总管 23:25 起连续 step/start（一直在跑），23:39:42 派话**仍然**进了 next-turn
+    //     ⇒ 那个 busy 判断当时是 false。而且就算判断对了，队首投递 也只是"排下一轮队首"，
+    //     长会话（一个回合跑几十分钟）里照样等于收不到。
+    //
+    // 现在：**只走 steer**，不猜、不降级。依据（读源码确认，不是推测）：
+    //   · `agent.steer(msg)` 等价于按「下一步」目标投递  —— 智能体循环层
+    //   · 投递实现会把消息插到「下一步」位置并唤醒驱动
+    //     ⇒ **空闲时也照样插进 next-step 并唤醒开新一轮**，不会失败、不会丢。
+    //   · `controller.prompt({mode:'steer'})` 的实现就是 `if (mode==='steer') agent.steer(msg)`
+    //     —— 会话控制层，**没有 busy 前置检查**。
+    //   ⇒ steer 是忙闲两种状态下都最正确的投递方式：忙则插当前回合下一步，闲则立刻开新一轮。
+    await controller.prompt(
+      {
+        sessionId,
+        requestId: `${RPC_PREFIX}${randomUUID()}`,
+        mode: 'steer',
+        content: [{ type: 'text', text }],
+      },
+      new AbortController().signal,
+    )
+    ctx.logger.info(`[auto-checkpoint] notify -> ${sessionId} via steer`)
+    return 'steer'
   }
 
   async function autoNotifyIfDone(agent) {
@@ -1812,6 +1932,14 @@ export function apply(ctx, config = {}) {
       ctx.logger.info(`[auto-checkpoint] auto-notify ${agent.id} -> ${parentId}`)
     } catch (error) {
       ctx.logger.warn(`[auto-checkpoint] auto-notify failed: ${error instanceof Error ? error.message : String(error)}`)
+      // 🛑 不再静默（2026-10-15）：ctx.logger 不进 web.log（§七），回报失败从前**完全没有痕迹**。
+      // 落一行到固定文件，排障只需 `tail`（用已导入的 appendFileSync，自带兜底 try）。
+      try {
+        appendFileSync(
+          join(homedir(), '.dsh', 'auto-checkpoint-notify.log'),
+          `${new Date().toISOString()} parent=${parentId} child=${agent?.id} err=${error instanceof Error ? error.message : String(error)}\n`,
+        )
+      } catch {}
     }
   }
 
@@ -1831,10 +1959,12 @@ export function apply(ctx, config = {}) {
       // the same project directory the task started in. The permission preset
       // is handed down right after the child is published.
       const preset = presetOf(agent)
-      const created = await controller.create({
-        cwd: agent.session?.header?.cwd,
-        ...(preset === undefined ? {} : { agentPreset: preset }),
-      })
+      const created = await controller.create(
+        workspaceRequestFor(
+          agent.session?.header?.cwd,
+          preset === undefined ? {} : { agentPreset: preset },
+        ),
+      )
       childId = created.sessionId
       ctx.logger.info(`[auto-checkpoint] child session ${childId} created (cwd=${agent.session?.header?.cwd ?? '?'} preset=${preset ?? 'default'})`)
       // The child is published with the profile's DEFAULT permission knobs, so
@@ -2081,6 +2211,30 @@ export function apply(ctx, config = {}) {
       `（2026-10-09 真实事故：内容写对了，标题却抄成别的会话 + 三天前的日期，\n` +
       `  下一个读者会当成旧档，可能照着过期结论干活。）\n` +
       `\n` +
+      `🛑🛑 **第 0 条，比下面 1-9 全都重要** —— 先写这一节，紧跟在标题后面：\n` +
+      `\`## 🔑 这一轮定下的结论（压缩后必须原样继承）\`\n` +
+      `\n` +
+      `**3-7 条，一条一句**，每条写成「**以后照着做的那句话**」+ 出处（\`文件:行号\`；\n` +
+      `查不到就写"会话内推得"，**别编行号**）。\n` +
+      `\n` +
+      `写什么：这一轮**想明白的、会改变下一步行为的**机制 / 判据 / 因果，**不是**"我干了什么"。\n` +
+      `验收判据：**如果压缩后的我漏了这一条，他会白干或者推反方向** —— 符合才写进来。\n` +
+      `\n` +
+      `✗ 反例（2026-10-25 真实事故的写法 —— 只列书名，不列结论）：\n` +
+      `     \`RESULT.md\` → 真机 446 会话归因 ——**还在用**\n` +
+      `     压缩后的我因此只读到"有这么一份文档"，没读到里面那条决定行为的机制，\n` +
+      `     于是把实验方向推反了：以为 K3.1 说 \`I need\` 是错的、要切预设去修它。\n` +
+      `✓ 正例：\n` +
+      `     **\`We need\` = 第一人称锚丢失时的缺省主语 ⇒ K3.1 的 \`I need\` 是实验起点，不是要修的 bug。**\n` +
+      `     （出处 \`yinyu-lab/RESULT.md:105\`）\n` +
+      `\n` +
+      `没有就写"（暂无）"，但**先把这一轮认真过一遍** —— 长会话连一条都想不出来，\n` +
+      `通常是你没总结，不是真的没有。\n` +
+      `\n` +
+      `---\n` +
+      `\n` +
+      `下面 1-9 条照常写：\n` +
+      `\n` +
       `1. \`## 现在在做什么 / 到哪一步\` —— 一两句。\n` +
       `2. \`## ⚠️ 已踩过的坑 / 验错的假设\` —— **最重要的一节**，压缩后最容易重蹈。\n` +
       `   一条一行，写清"不要做什么"和"为什么"。没有就写"（暂无）"，别省略。\n` +
@@ -2095,10 +2249,14 @@ export function apply(ctx, config = {}) {
       `5. \`## 结论 / 当前状态\` —— 哪些已验证、哪些还没验。\n` +
       `6. \`## 未决事项 / 卡点\`。\n` +
       `7. \`## 环境事实\` —— 路径、版本号、关键命令等**可复核**的事实（一行一条）。\n` +
-      `8. \`## 📚 项目知识档案（压缩后的你必看）\` —— **一行一条**：哪份文档 / 哪个目录装\n` +
-      `   什么经验（带路径），以及"你这一轮真正用上的是哪几份"。没有就写"（暂无）"，别省略。\n` +
-      `   ⚠️ 为什么必须写：压缩后的你**不会自动知道项目里有哪些文档** —— 你不把路径写下来，\n` +
-      `   项目里早已写好的经验就等于不存在（2026-10-06 真实事故 session-c41a9661）。\n` +
+      `8. \`## 📚 项目知识档案（压缩后的你必看）\` —— **这一节不是书单，是索引**。\n` +
+      `   ⭐ **先写「这一轮真正用上的那 1-3 份」**，每份一行：\`路径:行号\` → **用上了它的哪一条结论**\n` +
+      `   （一句话说清那条结论本身，不要只写"读过了/还在用"）。\n` +
+      `   然后才是「备查清单」：其余文档一行一条路径 + 一句它装什么。\n` +
+      `   ⚠️ 为什么这么改（2026-10-25 实测）：上一版要求"一行一条列文档"，结果一份落档列了 10 份、\n` +
+      `     合计 84 KB，而对每份只肯写一句话 —— 压缩后的我**读了落档也读不到内容**，\n` +
+      `     **列得越全，读的概率越低**。所以：用上的要写结论，没用上的才只写路径。\n` +
+      `   ⚠️ 为什么必须写：压缩后的你**不会自动知道项目里有哪些文档**（2026-10-06 真实事故 session-c41a9661）。\n` +
       `9. \`## 下一步第一件事\` —— 只写**一件**，具体到可以直接动手。\n` +
       `\n` +
       `写完只回一句「落档完成」，不要展开。`
@@ -2243,6 +2401,8 @@ export function apply(ctx, config = {}) {
     const endedAt = Number.isFinite(turnEndedAt) ? turnEndedAt : Date.now()
     const startedWaiting = Date.now()
     let busyRetries = 0
+    // 🆕 2026-10-19：瞬时网络错误的重试计数（与 busy 分开 —— 两者判据、上限、语义都不同）。
+    let transientRetries = 0
     try {
       // 先按老规矩歇一下：回合落盘 ≠ 内部状态全部释放（v2 实测出来的余量，别删）。
       await new Promise((resolve) => setTimeout(resolve, idleDelayMs()))
@@ -2289,6 +2449,26 @@ export function apply(ctx, config = {}) {
         //   「默认全关、只干**手动标记过**的会话」—— 落档不该是例外：
         //   未标记的会话被阀掐断后**直接压**，不额外多跑一轮去写文档。
         if (runtime.sessionModes[sessionId] === 'auto') {
+          // 🛑 2026-10-28 修「跨周期的旧落档冒充本周期落档」（用户报的真机事故，方案 A）。
+          //
+          // 事故（会话 `02ce1b44`「夺刃总管」，cwd `/root/aa`）：
+          //   落档 mtime `10-27 22:18`，而 `10-28 03:58` 那次压缩**没有催办、直接压了**。
+          //   旧判据的下界是 `lastCompactionEndMs()` = **上一次压缩结束**（`10-27 17:53`）⇒
+          //   `22:18 > 17:53` ⇒ 判定"新鲜" ⇒ 跳过催办。
+          //   ⇒ 但 `22:18 → 03:58` 这 **5 小时 40 分**的对话**完全没被写进任何落档**，
+          //     而它正是这次压缩要折叠掉的内容 ⇒ 折完只剩摘要，细节全丢。
+          //   （这正是 2026-10-12 那个 bug 的变体：那次挡的是"上一轮的旧档"，
+          //     挡不住"本周期内早早写过、之后又跑了半天"的档。）
+          //
+          // 修法（用户拍板 A）：判据锚定到**本次压缩周期的起点** ——
+          //   即"落档必须是在这次决定要压之后（或足够近）写的"。
+          //   实现：先按手动路径同一套口径把 `st.preflightAtMs` 设成
+          //   `now - AUTO_PRECOMPACT_REUSE_MS`，`freshPreflightSize` 会优先用它当下界；
+          //   若文件不够新 ⇒ 返回 0 ⇒ 走下面的催办分支（催一次，模型写完的 turn/end 会再进来）。
+          //   催满 `PRECOMPACT_MAX_ASKS` 仍没有 ⇒ 照旧照压（绝不把压缩卡死）。
+          if (!(Number.isFinite(st.preflightAtMs) && st.preflightAtMs > 0)) {
+            st.preflightAtMs = Date.now() - AUTO_PRECOMPACT_REUSE_MS
+          }
           const noteSize = await freshPreflightSize(agent, st)
           if (noteSize > 0) {
             // 🛑 用户拍板（2026-10-11）：落档里出现交棒意图 ⇒ **只提醒用户、不自动开**。
@@ -2347,6 +2527,28 @@ export function apply(ctx, config = {}) {
               ? `已压缩：${Math.round(pressure / 1000)}k → ${Math.round(after / 1000)}k token`
               : `已压缩（压缩前 ${Math.round(pressure / 1000)}k token）`,
           )
+        }
+        // 🆕 2026-10-19：瞬时网络错误 ⇒ **本轮内退避重试**，不等下一个 turn。
+        //   事故：`compaction/end {error:"Connection error."}` 只 1 秒就失败，随后**什么都没发生** ——
+        //   会话停在 385,894 token（阈值 380k）没压，用户只在界面上看到一行红字。
+        //   退避表见 AUTO_COMPACT_TRANSIENT_BACKOFF_MS；用完还失败才走下面那条 error。
+        if (outcome === 'transient') {
+          const attempt = transientRetries
+          transientRetries += 1
+          const wait = AUTO_COMPACT_TRANSIENT_BACKOFF_MS[attempt]
+          if (wait === undefined) {
+            return note(
+              'error',
+              `压缩连续 ${transientRetries} 次撞上网络错误（上游抖动），已放弃本轮；` +
+                `下次到点会再试（不算失败、不会被降级）`,
+            )
+          }
+          ctx.logger.info(
+            `[auto-checkpoint] auto compact transient retry ${attempt + 1}/` +
+              `${AUTO_COMPACT_TRANSIENT_BACKOFF_MS.length} for ${sessionId} in ${wait}ms`,
+          )
+          await new Promise((resolve) => setTimeout(resolve, wait))
+          continue
         }
         return note('error', '压缩没有成功（失败详情只在插件日志里，不落 web.log）')
       }
@@ -2786,6 +2988,19 @@ export function apply(ctx, config = {}) {
       // 本地准入拒绝：没发上游请求、不烧钱、不算失败，交给调用方继续等窗口。
       ctx.logger.info(`[auto-checkpoint] auto compact deferred (admission busy) for ${agent.id}: ${detail}`)
       return 'busy'
+    }
+    // 🆕 2026-10-19：**瞬时网络错误 ≠ 压缩失败**。
+    //   证据：`compaction/end {error:"Connection error."}` 只花 1 秒 —— 请求没走到模型就断了，
+    //   同一时段上游在抖（同会话 1 分钟前有 `llm/retry`）。
+    //   ① 不记 strike（否则抖两下就把好会话降级成「只提醒」，见常量注释）；
+    //   ② 也不写 `lastAutoCompactMs`（那是成功后的长冷却；瞬时失败要能马上再试）；
+    //   ③ 返回 'transient'，由调用方按退避重试。
+    if (AUTO_COMPACT_TRANSIENT_RE.test(detail)) {
+      ctx.logger.info(
+        `[auto-checkpoint] auto compact transient failure for ${agent.id} ` +
+          `(not a strike; upstream/network): ${detail}`,
+      )
+      return 'transient'
     }
     const strikes = (Number.isFinite(st.autoCompactFails) ? st.autoCompactFails : 0) + 1
     st.autoCompactFails = strikes
@@ -3555,10 +3770,9 @@ export function apply(ctx, config = {}) {
         sendJson(res, { ok: false, error: 'sessionController absent' }, 503)
         return
       }
-      const created = await controller.create({
-        cwd,
-        ...(typeof agentPreset === 'string' ? { agentPreset } : {}),
-      })
+      const created = await controller.create(
+        workspaceRequestFor(cwd, typeof agentPreset === 'string' ? { agentPreset } : {}),
+      )
       const sessionId = created.sessionId
       if (typeof permissionPreset === 'string' && permissionPreset) {
         try {
@@ -3572,7 +3786,7 @@ export function apply(ctx, config = {}) {
       }
       if (typeof provider === 'string' && typeof model === 'string') {
         // ⚠️ `controller.selectModel()` 内部**一定会**调
-        // `agentDefaultModel.saveSelection()`（见 dsh-api-session-controller/lib/index.js:621），
+        // `agentDefaultModel.saveSelection()`（见会话控制层的模型选择保存接口），
         // 也就是会把**全局默认模型**改成这里传的值 —— 那是 GUI "切模型"共用的副作用。
         // 用户 2026-10-02 明确要求：全局默认 `agent-default-model` **由他手动管理**，
         // 派活不该动它。所以这里先记下原值，改完会话再还原。
@@ -3624,11 +3838,14 @@ export function apply(ctx, config = {}) {
           req.on('error', reject)
         })
       } catch { sendJson(res, { ok: false, error: 'invalid JSON' }, 400); return }
-      const { sessionId, text, mode } = body
+      const { sessionId, text, mode, raw } = body
       if (typeof sessionId !== 'string' || !sessionId || typeof text !== 'string' || !text) {
         sendJson(res, { ok: false, error: 'need sessionId and text' }, 400); return
       }
-      const note = `[派活回报] ${text.slice(0, 4000)}`
+      // ⭐ 2026-10-21（用户要求）：`raw: true` ⇒ **原样透传，不加任何前缀**。
+      //    场景：补投用户自己说的话（飞书消息被卡住后补投），加前缀会让总管以为是派活回报。
+      //    默认仍加 `[派活回报]`（下游 队列/看板 依赖它区分来源）。
+      const note = raw === true ? text.slice(0, 4000) : `[派活回报] ${text.slice(0, 4000)}`
       const controller = ctx.get('sessionController')
       try {
         let used
@@ -3642,10 +3859,25 @@ export function apply(ctx, config = {}) {
             new AbortController().signal,
           )
         } else {
-          // ⭐ 默认（用户 2026-10-11 两轮反馈后的定稿）：
-          //   目标**正在跑** ⇒ steer 插进当前回合（秒级，代价是打断它当前的操作连贯性）；
-          //   目标**空闲**   ⇒ 插 `next-turn` 队首（下一轮就是它）；
-          //   steer 失败     ⇒ 自动降级成队首（不丢消息）。
+          // 🛑🛑 2026-10-22 定案：**不传 mode 时也一律 steer**，不再猜忙闲、不再降级。
+          //
+          // 史（用户同一个现象报了三次：「插话永远变成排队」「修了一个另一个没修啊」）：
+          //   ① 这里曾按 问「它现在忙闲」再分两路；忙 ⇒ steer，闲 ⇒ 队首投递（排下一轮队首）。
+          //   ② 实测证伪：总管 23:25 起连续 `step/start` 一直在跑，23:39 派话**仍被判"不忙"**进了 next-turn
+          //      （`agents.get()` 大概返回 null ⇒ status undefined ⇒ busy=false）。
+          //   ③ 更根本的是：**队首投递 只是"排下一轮队首"**。目标一个回合跑几十分钟时，
+          //      无论猜得多准，等于收不到 —— 用户看到的「排队」就是这个。
+          //   ④ 真正致命的是**第三层**：总管/经理**自己直接 curl 这个端点**（不走 `队列.py`），
+          //      只要不传 mode 就掉进旧逻辑 ⇒ 我在 Python 侧怎么改都救不到它们。
+          //      ⇒ 必须在**端点侧**兜底：这里默认就是 steer。
+          //
+          // 依据（读宿主源码确认，不是推测）：
+          //   · `agent.steer(msg)` 等价于按「下一步」目标投递（智能体循环层）
+          //   · 投递实现会把消息插到「下一步」位置并唤醒驱动
+          //     ⇒ **空闲时也照样插 next-step 并立刻开新一轮**，不会失败、不会丢。
+          //   · `controller.prompt({mode:'steer'})` = `if (mode==='steer') agent.steer(msg)`
+          //     （会话控制层），**没有 busy 前置检查**。
+          //   ⇒ steer 在忙、闲两种状态下都是最正确的投递方式。
           used = await promptFast(sessionId, note)
         }
         ctx.logger.info(`[auto-checkpoint] notify -> ${sessionId} (mode=${used})`)
